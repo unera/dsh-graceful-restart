@@ -247,13 +247,16 @@ window.__ModuleLoader__.load({
 				);
 				var input;
 				if (field.kind === "select") {
+					var choices = field.options.map(function(option) {
+						return typeof option === "string" ? { value: option, label: option } : option;
+					});
 					input = h("select", {
-						value: String(props.value == null ? field.options[0] : props.value),
+						value: String(props.value == null ? choices[0].value : props.value),
 						disabled: disabled,
 						style: INPUT_STYLE,
 						onChange: function(event) { commit(props.scope, field.key, event.target.value); },
-					}, field.options.map(function(option) {
-						return h("option", { key: option, value: option }, option);
+					}, choices.map(function(option) {
+						return h("option", { key: option.value, value: option.value }, option.label);
 					}));
 				} else if (field.kind === "number") {
 					input = h("input", {
@@ -311,7 +314,13 @@ window.__ModuleLoader__.load({
 		// something to systemctl, a command only to command. Both are still
 		// stored, so switching back and forth keeps what was typed.
 		var FIELDS = [
-			{ key: "exitMethod", kind: "select", options: ["systemctl", "command", "kill", "exit"] },
+			// Labels spell out what actually runs; the stored value stays short.
+			{ key: "exitMethod", kind: "select", options: [
+				{ value: "systemctl", label: "systemctl --user restart" },
+				{ value: "command", label: "command" },
+				{ value: "kill", label: "kill" },
+				{ value: "exit", label: "exit" },
+			] },
 			{ key: "serviceUnit", kind: "text", placeholder: "dsh-server", visible: function(value) { return (value.exitMethod || "systemctl") === "systemctl"; } },
 			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server", visible: function(value) { return value.exitMethod === "command"; } },
 			{ key: "quietSeconds", kind: "number" },
