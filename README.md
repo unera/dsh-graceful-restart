@@ -123,6 +123,12 @@ the settings card is keyed by the bundle's package name.
 
 ## Notes
 
+- Optional host services (`webServer`, `settings`, `sessionController`, `sessions`)
+  are taken through `ctx.inject`, never `ctx.get`: cordis grants a plugin only the
+  services it declared, and questioning a service it was not granted answers
+  `undefined`. That is what kept the status route unmounted and the post-restart
+  note undelivered in 0.1.3.
+
 - `kill` and `exit` end the process; under `Restart=on-failure` a clean exit or
   SIGTERM is not a failure, so the host stays down unless something else starts
   it. Use `systemctl` unless you know your supervisor restarts on clean exits.

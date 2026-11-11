@@ -605,25 +605,43 @@ export function createTools ({ dict, register, cancel, pending }) {
 
 /* -------------------------------------------------------------------- host */
 
-/** Read a service the host may or may not provide, without failing startup. */
-function service (ctx, key) {
-  try {
-    const found = typeof ctx.get === 'function' ? ctx.get(key) : undefined
-    return found ?? null
-  } catch {
-    return null
-  }
-}
-
-/** Read the current settings section of this entry, when a settings service exists. */
-function settingsSection (ctx) {
-  const settings = service(ctx, 'settings')
+/** Read one namespace section out of a settings service, or null. */
+export function settingsSectionOf (settings) {
   if (!settings || typeof settings.describe !== 'function') return null
   try {
     const entry = settings.describe().find(candidate => String(candidate?.ns) === name)
     return entry?.value && typeof entry.value === 'object' ? entry.value : null
   } catch {
     return null
+  }
+}
+
+/**
+ * Build the status route answer: the counters the settings card cannot read on
+ * its own. Kept pure so the route stays a one-liner and the shape is testable.
+ * @param input - process and queue facts.
+ * @returns the JSON body object.
+ */
+export function statusSnapshot ({
+  uptimeMs = Math.round(process.uptime() * 1000),
+  pid = process.pid,
+  now = Date.now(),
+  quietSeconds = DEFAULT_QUIET_SECONDS,
+  exitMethod = 'systemctl',
+  pending = 0,
+  busy = 0,
+  quiet = null,
+} = {}) {
+  return {
+    ok: true,
+    pid,
+    startedAt: new Date(now - uptimeMs).toISOString(),
+    uptimeMs,
+    quietSeconds,
+    exitMethod,
+    pending,
+    busy,
+    quiet,
   }
 }
 
@@ -635,8 +653,17 @@ function settingsSection (ctx) {
  */
 export function apply (ctx, config = {}) {
   let initial = normalizeConfig(config)
+
+  // cordis hands a plugin only the services it declared: `ctx.get('webServer')`
+  // asks for something never granted and answers undefined, which is exactly how
+  // the uptime route and the post-restart note went missing once. Every optional
+  // service is taken through `inject`, and its disappearance is undone with it.
+  let liveSettings = null
+  let control = null
+  let sessions = null
+
   const options = () => {
-    const live = settingsSection(ctx)
+    const live = settingsSectionOf(liveSettings)
     return live ? normalizeConfig({ ...initial, ...live }) : initial
   }
   const stateDir = () => resolveStateDir(options())
@@ -736,9 +763,10 @@ export function apply (ctx, config = {}) {
 
   /** Wake one session with the post-restart note. */
   async function wake (sessionId, text) {
-    const control = service(ctx, 'sessionController')
-    const sessions = service(ctx, 'sessions')
-    if (!control || typeof control.resolveAgent !== 'function') return false
+    if (!control || typeof control.resolveAgent !== 'function') {
+      log('warn', 'sessionController is not available here: the note has nowhere to go')
+      return false
+    }
     for (let attempt = 1; attempt <= NOTIFY_ATTEMPTS; attempt += 1) {
       try {
         const resolved = await control.resolveAgent(sessionId)
@@ -802,31 +830,21 @@ export function apply (ctx, config = {}) {
   // `process.uptime()` itself, and the card shows the uptime of the process the
   // plugin lives in. Registered as its own exact path, so it never touches the
   // app's session routes; it exposes no causes, only counters.
-  ctx.effect(() => {
-    const server = service(ctx, 'webServer')
-    if (!server || typeof server.register !== 'function') {
-      log('info', 'no webServer service: the uptime route is not mounted')
-      return () => {}
-    }
+  function mountStatus (server) {
     const route = {
       kind: 'exact',
       path: STATUS_PATH,
       handler: (request, response) => {
         const current = options()
-        const uptimeMs = Math.round(process.uptime() * 1000)
         const pending = queue.pending()
         const busy = ctx.agents.list().filter(agent => agent.status === 'running')
-        const body = JSON.stringify({
-          ok: true,
-          pid: process.pid,
-          startedAt: new Date(Date.now() - uptimeMs).toISOString(),
-          uptimeMs,
+        const body = JSON.stringify(statusSnapshot({
           quietSeconds: current.quietSeconds,
           exitMethod: current.exitMethod,
           pending: pending.length,
           busy: busy.length,
           quiet: queue.quietSince === null ? null : Math.round((Date.now() - queue.quietSince) / 1000),
-        })
+        }))
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         response.end(body)
       },
@@ -839,7 +857,30 @@ export function apply (ctx, config = {}) {
       log('warn', `cannot mount ${STATUS_PATH}: ${error?.message ?? error}`)
       return () => {}
     }
-  }, `${name}: status route`)
+  }
+
+  ctx.inject(['webServer'], child => {
+    if (!child.webServer || typeof child.webServer.register !== 'function') return () => {}
+    const dispose = child.effect(() => mountStatus(child.webServer), `${name}: status route`)
+    return () => { try { dispose?.() } catch {} }
+  })
+
+  ctx.inject(['settings'], child => {
+    liveSettings = child.settings
+    log('info', 'settings service available: the card edits are read live')
+    return () => { liveSettings = null }
+  })
+
+  ctx.inject(['sessionController'], child => {
+    control = child.sessionController
+    log('info', 'sessionController available: post-restart notes can be delivered')
+    return () => { control = null }
+  })
+
+  ctx.inject(['sessions'], child => {
+    sessions = child.sessions
+    return () => { sessions = null }
+  })
 
   // Tools are registered globally, so every agent — the main session and every
   // subagent — sees them with the same description and the same contract.
@@ -862,12 +903,14 @@ export function apply (ctx, config = {}) {
   ctx.effect(() => () => queue.stop(), `${name}: watcher`)
 
   // The host needs a moment before a session can be resumed; the note is not
-  // urgent, and a failed attempt is retried rather than lost.
-  const startTimer = setTimeout(() => { void deliverPending() }, 2000)
+  // urgent, and a failed attempt is retried rather than lost. `notifyDelayMs` is
+  // a test knob only: the Loader passes nothing but the Config schema fields.
+  const notifyDelayMs = Number.isFinite(config?.notifyDelayMs) ? config.notifyDelayMs : 2000
+  const startTimer = setTimeout(() => { void deliverPending() }, notifyDelayMs)
   startTimer.unref?.()
   ctx.effect(() => () => clearTimeout(startTimer), `${name}: pending notifications`)
 
-  initial = normalizeConfig({ ...initial, ...(settingsSection(ctx) ?? {}) })
+  initial = normalizeConfig({ ...initial, ...(settingsSectionOf(liveSettings) ?? {}) })
   log('info', `ready: exitMethod=${initial.exitMethod} quietSeconds=${initial.quietSeconds} language=${initial.language}`)
 }
 
