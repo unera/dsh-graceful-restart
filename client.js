@@ -128,7 +128,9 @@ window.__ModuleLoader__.load({
 				);
 				var value = (snapshot && snapshot.value) || {};
 				var writable = snapshot && snapshot.writable === true;
-				var rows = FIELDS.map(function(field) {
+				var rows = FIELDS.filter(function(field) {
+					return field.visible ? field.visible(value) : true;
+				}).map(function(field) {
 					return h(Row, {
 						key: field.key,
 						field: field,
@@ -216,10 +218,13 @@ window.__ModuleLoader__.load({
 			padding: "4px 8px",
 		};
 
+		// The two dependent fields follow the exit method: a unit only means
+		// something to systemctl, a command only to command. Both are still
+		// stored, so switching back and forth keeps what was typed.
 		var FIELDS = [
 			{ key: "exitMethod", kind: "select", options: ["systemctl", "command", "kill", "exit"] },
-			{ key: "serviceUnit", kind: "text", placeholder: "dsh-server" },
-			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server" },
+			{ key: "serviceUnit", kind: "text", placeholder: "dsh-server", visible: function(value) { return (value.exitMethod || "systemctl") === "systemctl"; } },
+			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server", visible: function(value) { return value.exitMethod === "command"; } },
 			{ key: "quietSeconds", kind: "number" },
 			{ key: "reasonFile", kind: "text", placeholder: "/home/user/.cache/dsh-restart-reason.txt" },
 			{ key: "language", kind: "select", options: ["en", "ru", "zh"] },
