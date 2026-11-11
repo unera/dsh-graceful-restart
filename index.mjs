@@ -82,6 +82,9 @@ export const Config = z.object({
   reasonFile: z.string().default('')
     .description('Optional file that receives the causes before the restart, one line. On this host /home/dsh/.cache/dsh-restart-reason.txt is read by the start-up report.')
     .volatile(),
+  waitForJobs: z.boolean().default(false)
+    .description('Hold the restart while a background job (run_in_background, job_*) is running. Off by default: a long-lived job such as a dev server would otherwise postpone the restart forever.')
+    .volatile(),
   language: z.string().default('en')
     .description('Language of tool descriptions, tool answers and the post-restart note: en (default), ru, zh.')
     .volatile(),
@@ -229,6 +232,7 @@ export function normalizeConfig (raw) {
     exitCommand: text(value.exitCommand, ''),
     quietSeconds: number(value.quietSeconds, DEFAULT_QUIET_SECONDS),
     reasonFile: text(value.reasonFile, ''),
+    waitForJobs: value.waitForJobs === true,
     language: text(value.language, 'en') || 'en',
     stateDir: text(value.stateDir, ''),
   }
@@ -269,6 +273,9 @@ export class RestartQueue {
   /** Agent ids seen on the previous tick, to notice a session that appeared out of nowhere. */
   seen = new Set()
 
+  /** Job ids already reported as holding the restart, so the log does not repeat them. */
+  notedJobs = new Set()
+
   /** Set once the queue has fired; a fired queue never fires again. */
   fired = false
 
@@ -287,6 +294,8 @@ export class RestartQueue {
     quietMs = DEFAULT_QUIET_SECONDS * 1000,
     pollMs = POLL_MS,
     listAgents = () => [],
+    listJobs = () => [],
+    waitForJobs = () => false,
     onReady = () => {},
     log = () => {},
     now = () => Date.now(),
@@ -296,6 +305,8 @@ export class RestartQueue {
     this.quietMsOf = typeof quietMs === 'function' ? quietMs : () => quietMs
     this.pollMs = pollMs
     this.listAgents = listAgents
+    this.listJobs = listJobs
+    this.waitForJobs = waitForJobs
     this.onReady = onReady
     this.log = log
     this.now = now
@@ -375,7 +386,18 @@ export class RestartQueue {
     const ids = new Set(agents.map(agent => String(agent.id ?? '')))
     const appeared = [...ids].some(id => id && !this.seen.has(id))
     this.seen = ids
-    const busy = agents.filter(agent => agent.status === 'running').map(agent => String(agent.id ?? ''))
+    const running = agents.filter(agent => agent.status === 'running').map(agent => String(agent.id ?? ''))
+    // Background jobs are work too, but only when the human asked them to count:
+    // a dev server that never ends must not postpone the restart forever.
+    const jobs = this.waitForJobs() ? (this.listJobs() || []).filter(job => job && (job.status === 'running' || job.status === 'stopping')) : []
+    for (const job of jobs) {
+      const jobId = String(job.id ?? job.label ?? 'job')
+      if (!this.notedJobs.has(jobId)) {
+        this.notedJobs.add(jobId)
+        this.log('info', `background job ${jobId} (${job.label ?? job.kind ?? 'job'}) is holding the restart`)
+      }
+    }
+    const busy = [...running, ...jobs.map(job => String(job.id ?? job.label ?? 'job'))]
     const quietMs = this.quietMsOf()
     if (busy.length > 0) {
       this.quietSince = null
@@ -620,6 +642,7 @@ export function statusSnapshot ({
   exitMethod = 'systemctl',
   pending = 0,
   busy = 0,
+  jobs = 0,
   quiet = null,
 } = {}) {
   return {
@@ -631,6 +654,7 @@ export function statusSnapshot ({
     exitMethod,
     pending,
     busy,
+    jobs,
     quiet,
   }
 }
@@ -650,6 +674,7 @@ export function apply (ctx, config = {}) {
   // service is taken through `inject`, and its disappearance is undone with it.
   let liveSettings = null
   let scheduling = null
+  let jobRegistry = null
 
   const options = () => {
     const live = settingsSectionOf(liveSettings)
@@ -688,9 +713,41 @@ export function apply (ctx, config = {}) {
     return null
   }
 
+  /**
+   * Background jobs that are still working.
+   *
+   * `jobs.list()` without a caller answers only unowned jobs: the registry filters
+   * by `job.owner === caller`. Session-owned jobs are therefore collected per live
+   * agent, which is the only seam the public API offers.
+   *
+   * @returns running and stopping job views, deduplicated.
+   */
+  function runningJobs () {
+    if (!jobRegistry || typeof jobRegistry.list !== 'function') return []
+    const collected = new Map()
+    const take = list => {
+      for (const job of list || []) {
+        if (job && (job.status === 'running' || job.status === 'stopping')) collected.set(String(job.id ?? job.label), job)
+      }
+    }
+    try {
+      take(jobRegistry.list())
+      for (const agent of ctx.agents.list()) {
+        const sessionId = agent?.session?.id
+        if (!sessionId) continue
+        try {
+          take(jobRegistry.list(sessionId))
+        } catch {}
+      }
+    } catch {}
+    return [...collected.values()]
+  }
+
   const queue = new RestartQueue({
     quietMs: () => options().quietSeconds * 1000,
     listAgents: () => ctx.agents.list(),
+    listJobs: () => runningJobs(),
+    waitForJobs: () => options().waitForJobs,
     log,
     now: () => Date.now(),
     onReady: records => finish(records),
@@ -884,6 +941,7 @@ export function apply (ctx, config = {}) {
           exitMethod: current.exitMethod,
           pending: pending.length,
           busy: busy.length,
+          jobs: runningJobs().length,
           quiet: queue.quietSince === null ? null : Math.round((Date.now() - queue.quietSince) / 1000),
         }))
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -910,6 +968,12 @@ export function apply (ctx, config = {}) {
     liveSettings = child.settings
     log('info', 'settings service available: the card edits are read live')
     return () => { liveSettings = null }
+  })
+
+  ctx.inject(['jobs'], child => {
+    jobRegistry = child.jobs
+    log('info', 'jobs service available: the job option can hold a restart')
+    return () => { jobRegistry = null }
   })
 
   ctx.inject(['schedule'], child => {

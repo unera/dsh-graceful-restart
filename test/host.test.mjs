@@ -109,6 +109,43 @@ test('cancelling the last request cancels the restart, one of two does not', () 
   assert.deepEqual(clean.cancel(only.id), { found: false, remaining: 0 })
 })
 
+test('a running background job holds the restart only when the option asks for it', () => {
+  const running = [{ id: 'bash-1', label: 'npm run dev', status: 'running' }]
+  const agents = [{ id: 'a', status: 'idle' }]
+
+  const ignored = new RestartQueue({
+    quietMs: 0,
+    pollMs: 1000,
+    now: () => 5000,
+    listAgents: () => agents,
+    listJobs: () => running,
+    waitForJobs: () => false,
+    onReady: () => {},
+    setTimer: () => ({ fake: true }),
+    clearTimer: () => {},
+  })
+  ignored.request({ cause: 'update' })
+  ignored.tick() // the first heartbeat only opens the window
+  assert.equal(ignored.tick().fire, true, 'by default a job does not postpone anything')
+
+  const counted = new RestartQueue({
+    quietMs: 0,
+    pollMs: 1000,
+    now: () => 5000,
+    listAgents: () => agents,
+    listJobs: () => running,
+    waitForJobs: () => true,
+    onReady: () => {},
+    setTimer: () => ({ fake: true }),
+    clearTimer: () => {},
+  })
+  counted.request({ cause: 'update' })
+  counted.tick()
+  const tick = counted.tick()
+  assert.equal(tick.fire, false, 'the job holds the window')
+  assert.deepEqual(tick.busy, ['bash-1'])
+})
+
 test('a fired queue never fires twice', () => {
   const { queue, state, tick, advance } = harness({ quietMs: 0 })
   state.agents = []
@@ -126,6 +163,7 @@ test('config normalization never throws and keeps values inside bounds', () => {
     exitCommand: '',
     quietSeconds: 10,
     reasonFile: '',
+    waitForJobs: false,
     language: 'en',
     stateDir: '',
   })
@@ -134,6 +172,8 @@ test('config normalization never throws and keeps values inside bounds', () => {
   assert.equal(normalizeConfig({ quietSeconds: -5 }).quietSeconds, 10)
   assert.equal(normalizeConfig({ exitCommand: '  reboot  ' }).exitCommand, 'reboot')
   assert.equal(normalizeConfig({ language: 'RU' }).language, 'RU')
+  assert.equal(normalizeConfig({}).waitForJobs, false)
+  assert.equal(normalizeConfig({ waitForJobs: true }).waitForJobs, true)
 })
 
 test('every field the Config schema declares is handled by normalizeConfig', () => {

@@ -25,6 +25,7 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
     webServer: { register: route => { routes.push(route); return () => {} } },
     settings: { describe: () => settingsValue === null ? [] : [{ ns: 'dsh-graceful-restart', value: settingsValue }] },
     // The cron-style delivery path: a one-shot schedule task bound to the session.
+    jobs: { list: () => [] },
     schedule: {
       create: async (sessionId, request) => {
         // The real service validates its request; the fake mirrors that, because
@@ -100,7 +101,7 @@ test('both tools are registered globally, and the optional services were asked f
   apply(host.ctx, { stateDir: mkdtempSync(join(tmpdir(), 'gr-tools-')), notifyDelayMs: 1 })
   assert.deepEqual(host.registered.map(tool => tool.name), ['dsh_restart', 'dsh_restart_cancel'])
   const asked = host.requested.map(deps => deps.join('+')).sort()
-  assert.deepEqual(asked, ['schedule', 'settings', 'webServer'])
+  assert.deepEqual(asked, ['jobs', 'schedule', 'settings', 'webServer'])
 })
 
 test('a previous restart wakes the session that asked for a note', async () => {

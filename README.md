@@ -81,6 +81,7 @@ the settings service persists). Language: English, Russian, Chinese.
 | `serviceUnit` | `dsh-server` | Unit restarted by `systemctl`. |
 | `exitCommand` | — | Shell command for `command`, started detached from the dying process. |
 | `quietSeconds` | `10` | How long the host must stay idle after the last activity, re-checked every second. |
+| `waitForJobs` | `false` | Hold the restart while a background job (`run_in_background`, `job_*`) is running or stopping. Off by default on purpose: a dev server that never ends would postpone the restart forever. When it is on, the job id and label are logged once, and they are counted in the card's status line. |
 | `reasonFile` | — | Optional file that receives the causes before the restart, one line. On a host where the unit's `ExecStartPost` prints a start-up report, point this at the file that report reads (for example `/home/dsh/.cache/dsh-restart-reason.txt`). |
 | `language` | `en` | Language of tool descriptions, tool answers and the post-restart note: `en`, `ru`, `zh`. |
 | `stateDir` | `$DSH_HOME/graceful-restart` | Requests, event log and pending notifications. |
@@ -146,6 +147,7 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
 - A `pending.json` newer than the running process is dropped at start: it can
   only come from an exit that never happened, and announcing that restart would
   be a lie.
+- Background jobs are opt-in: with `waitForJobs` off a restart kills them silently. `ctx.jobs.list()` without a caller returns only *unowned* jobs (the registry filters by `job.owner === caller`), so the plugin collects session-owned ones per live agent.
 - The plugin does not watch HTTP requests, only agents. A user typing a follow-up
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.
