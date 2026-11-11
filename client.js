@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
 
 		var NS = "dsh-graceful-restart";
 		var ENTRY = "dsh-graceful-restart";
+		var STATUS_PATH = "/api/graceful-restart/status";
 
 		var DICTIONARIES = {
 			en: {
@@ -26,6 +27,13 @@ window.__ModuleLoader__.load({
 				"language": "Language",
 				"language.hint": "Language of tool descriptions, tool answers and the post-restart note.",
 				"readonly": "Configuration is read-only here.",
+				"uptime": "Uptime",
+				"uptime.hint": "How long the host process has been running, updated every second.",
+				"uptimeIdle": "idle for {quiet}s of {need}s",
+				"uptimeBusy": "{busy} session(s) working",
+				"uptimePending": "restart pending: {pending} request(s)",
+				"uptimeNoRestart": "no restart pending",
+				"uptimeUnknown": "not available",
 			},
 			ru: {
 				"title": "Аккуратный перезапуск",
@@ -43,6 +51,13 @@ window.__ModuleLoader__.load({
 				"language": "Язык",
 				"language.hint": "Язык описаний инструментов, ответов инструментов и записки после перезапуска.",
 				"readonly": "Настройки доступны только для чтения.",
+				"uptime": "Время работы",
+				"uptime.hint": "Сколько работает процесс хоста; обновляется каждую секунду.",
+				"uptimeIdle": "простой {quiet} с из {need} с",
+				"uptimeBusy": "работают сессии: {busy}",
+				"uptimePending": "ожидает перезапуска: заявок {pending}",
+				"uptimeNoRestart": "перезапуск не запланирован",
+				"uptimeUnknown": "недоступно",
 			},
 			zh: {
 				"title": "优雅重启",
@@ -60,6 +75,13 @@ window.__ModuleLoader__.load({
 				"language": "语言",
 				"language.hint": "工具描述、工具回复以及重启后消息的语言。",
 				"readonly": "此处配置为只读。",
+				"uptime": "运行时间",
+				"uptime.hint": "宿主进程已运行的时长，每秒刷新。",
+				"uptimeIdle": "已静默 {quiet} 秒（共 {need} 秒）",
+				"uptimeBusy": "正在工作的会话：{busy}",
+				"uptimePending": "等待重启：{pending} 条请求",
+				"uptimeNoRestart": "没有等待中的重启",
+				"uptimeUnknown": "不可用",
 			},
 		};
 
@@ -143,9 +165,76 @@ window.__ModuleLoader__.load({
 				return h("div", { style: { display: "grid", gap: "4px" } },
 					h("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--dsw-alias-label-primary, inherit)", padding: "2px 0 4px" } }, t("title")),
 					h("div", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))", padding: "0 0 6px" } }, t("intro")),
+					h(Uptime, { key: "uptime", t: t }),
 					rows,
 					writable ? null : h("div", { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))", paddingTop: "4px" } }, t("readonly")),
 				);
+			}
+
+			// The uptime of the process the plugin lives in: the browser cannot read
+			// it, so the host answers on its own small route. The clock ticks locally
+			// every second and the route is re-read every five, so the number keeps
+			// moving even while a request is in flight or the host is busy.
+			function Uptime(props) {
+				var t2 = props.t;
+				var stored = React.useState(null);
+				var data = stored[0];
+				var setData = stored[1];
+				var ticker = React.useState(0);
+				var setTick = ticker[1];
+				React.useEffect(function() {
+					var alive = true;
+					function read() {
+						try {
+							Promise.resolve(fetch(STATUS_PATH, { cache: "no-store", headers: { accept: "application/json" } }))
+								.then(function(response) { return response && response.ok ? response.json() : null; })
+								.then(function(payload) { if (alive && payload && payload.ok === true) setData(payload); })
+								.catch(function() {});
+						} catch (error) {}
+					}
+					read();
+					var poll = setInterval(read, 5000);
+					var tick = setInterval(function() { setTick(function(n) { return n + 1; }); }, 1000);
+					return function() { alive = false; clearInterval(poll); clearInterval(tick); };
+				}, []);
+				var value = "—";
+				var detail = t2("uptimeUnknown");
+				if (data && data.startedAt) {
+					value = formatDuration(Date.now() - Date.parse(data.startedAt));
+					var parts = [];
+					if (data.pending > 0) {
+						parts.push(formatText(t2("uptimePending"), { pending: data.pending }));
+						if (data.busy > 0) parts.push(formatText(t2("uptimeBusy"), { busy: data.busy }));
+						else if (data.quiet != null) parts.push(formatText(t2("uptimeIdle"), { quiet: data.quiet, need: data.quietSeconds }));
+					} else {
+						parts.push(t2("uptimeNoRestart"));
+					}
+					detail = parts.join(" · ");
+				}
+				return h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "8px 0 10px", borderTop: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2))" } },
+					h("div", { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
+						h("span", { style: { fontSize: "13px", color: "var(--dsw-alias-label-primary, inherit)" } }, t2("uptime")),
+						h("span", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))" } }, detail),
+					),
+					h("span", { style: { fontVariantNumeric: "tabular-nums", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "14px", color: "var(--dsw-alias-label-primary, inherit)" } }, value),
+				);
+			}
+
+			function formatDuration(ms) {
+				var total = Math.max(0, Math.floor(ms / 1000));
+				var days = Math.floor(total / 86400);
+				var hours = Math.floor((total % 86400) / 3600);
+				var minutes = Math.floor((total % 3600) / 60);
+				var seconds = total % 60;
+				var pad = function(n) { return (n < 10 ? "0" : "") + n; };
+				var clock = pad(hours) + ":" + pad(minutes) + ":" + pad(seconds);
+				return days > 0 ? days + "d " + clock : clock;
+			}
+
+			function formatText(template, vars) {
+				return String(template).replace(/\{(\w+)\}/g, function(whole, key) {
+					return Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : whole;
+				});
 			}
 
 			function Row(props) {

@@ -40,6 +40,9 @@ export const inject = ['tools', 'agents']
 /** Poll period of the watcher. The spec asks for a one-second heartbeat. */
 const POLL_MS = 1000
 
+/** Path the settings card polls for uptime and the quiet-window counters. */
+export const STATUS_PATH = '/api/graceful-restart/status'
+
 /** Retries for waking a session after the restart: services come up asynchronously. */
 const NOTIFY_ATTEMPTS = 8
 
@@ -794,6 +797,49 @@ export function apply (ctx, config = {}) {
       log('warn', `cannot rewrite ${pendingFile()}: ${error?.message ?? error}`)
     }
   }
+
+  // A tiny status route for the settings card: the browser cannot read
+  // `process.uptime()` itself, and the card shows the uptime of the process the
+  // plugin lives in. Registered as its own exact path, so it never touches the
+  // app's session routes; it exposes no causes, only counters.
+  ctx.effect(() => {
+    const server = service(ctx, 'webServer')
+    if (!server || typeof server.register !== 'function') {
+      log('info', 'no webServer service: the uptime route is not mounted')
+      return () => {}
+    }
+    const route = {
+      kind: 'exact',
+      path: STATUS_PATH,
+      handler: (request, response) => {
+        const current = options()
+        const uptimeMs = Math.round(process.uptime() * 1000)
+        const pending = queue.pending()
+        const busy = ctx.agents.list().filter(agent => agent.status === 'running')
+        const body = JSON.stringify({
+          ok: true,
+          pid: process.pid,
+          startedAt: new Date(Date.now() - uptimeMs).toISOString(),
+          uptimeMs,
+          quietSeconds: current.quietSeconds,
+          exitMethod: current.exitMethod,
+          pending: pending.length,
+          busy: busy.length,
+          quiet: queue.quietSince === null ? null : Math.round((Date.now() - queue.quietSince) / 1000),
+        })
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        response.end(body)
+      },
+    }
+    try {
+      const dispose = server.register(route)
+      log('info', `status route mounted at ${STATUS_PATH}`)
+      return () => { try { dispose?.() } catch {} }
+    } catch (error) {
+      log('warn', `cannot mount ${STATUS_PATH}: ${error?.message ?? error}`)
+      return () => {}
+    }
+  }, `${name}: status route`)
 
   // Tools are registered globally, so every agent — the main session and every
   // subagent — sees them with the same description and the same contract.

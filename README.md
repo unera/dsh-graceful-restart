@@ -85,6 +85,16 @@ the settings service persists). Language: English, Russian, Chinese.
 | `language` | `en` | Language of tool descriptions, tool answers and the post-restart note: `en`, `ru`, `zh`. |
 | `stateDir` | `$DSH_HOME/graceful-restart` | Requests, event log and pending notifications. |
 
+## Uptime on the settings card
+
+The card shows the uptime of the host process, ticking every second, next to a
+one-line state: either "restart pending: N request(s)" with the quiet window
+(`idle for 7s of 10s`) or the number of working sessions, or "no restart
+pending". The host answers `GET /api/graceful-restart/status` with the counters
+the browser cannot read itself (`process.uptime()`, pid, pending requests, busy
+agents). The route exposes no causes and no session ids; it is mounted only when
+the host has a `webServer` service.
+
 ## Files it leaves behind
 
 | File | Contents |
