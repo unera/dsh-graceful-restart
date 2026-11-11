@@ -1,9 +1,12 @@
 # Bundle layer for @dr-co/dsh-graceful-restart.
 #
-# The row id must equal the package name: the client-modules scan matches the
-# Loader specifier against the nearest manifest name, and the config form on the
-# Plugins page is keyed by the bundle's package name. An alias here would keep
-# the tools working and silently drop the settings card.
+# Two identities, and both are load-bearing:
+#   - `name` is the module specifier and must equal package.json `name`, because
+#     the client-modules scan matches the nearest manifest name against it — that
+#     is how the browser card gets loaded at all;
+#   - `id` is the Loader entry, and the settings namespace IS the entry id (the
+#     settings service answers "Plugin entry <id> has no volatile fields"), so it
+#     stays short and the browser card asks configForms for it.
 - insert:
     - id: dsh-graceful-restart
       name: '@dr-co/dsh-graceful-restart'
