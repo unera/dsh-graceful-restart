@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { STATUS_PATH, apply } from '../index.mjs'
 
 /** A host that grants exactly the services the plugin asks for, and nothing else. */
-function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }) } = {}) {
+function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }), delayServices = {} } = {}) {
   const registered = []
   const routes = []
   const followed = []
@@ -24,19 +24,15 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
   const services = () => ({
     webServer: { register: route => { routes.push(route); return () => {} } },
     settings: { describe: () => settingsValue === null ? [] : [{ ns: 'dsh-graceful-restart', value: settingsValue }] },
-    sessionController: {
-      resolveAgent: async id => {
-        const outcome = resolve(id)
-        if (outcome?.error) return { error: outcome.error }
-        return {
-          agent: {
-            session: { id },
-            followup: message => followed.push({ id, text: message.content[0].text, source: message.source }),
-          },
-        }
+    // The cron-style delivery path: a one-shot schedule task bound to the session.
+    schedule: {
+      create: async (sessionId, request) => {
+        const outcome = resolve(sessionId)
+        if (outcome?.error) throw outcome.error
+        followed.push({ id: sessionId, title: request.title, text: request.prompt, after: request.after_seconds })
+        return { id: 'sched-1', sessionId, record: request }
       },
     },
-    sessions: { flush: async session => { flushes.push(session.id); return true } },
   })
   const ctx = {
     agents: { list: () => agents },
@@ -49,7 +45,14 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
       const available = services()
       const child = { effect: ctx.effect }
       for (const key of deps) if (key in available) child[key] = available[key]
-      const dispose = callback(child)
+      const delay = Math.max(...deps.map(key => delayServices[key] ?? 0))
+      let dispose
+      if (delay > 0) {
+        const timer = setTimeout(() => { dispose = callback(child) }, delay)
+        timer.unref?.()
+      } else {
+        dispose = callback(child)
+      }
       return () => { if (typeof dispose === 'function') dispose() }
     },
   }
@@ -90,7 +93,7 @@ test('both tools are registered globally, and the optional services were asked f
   apply(host.ctx, { stateDir: mkdtempSync(join(tmpdir(), 'gr-tools-')), notifyDelayMs: 1 })
   assert.deepEqual(host.registered.map(tool => tool.name), ['dsh_restart', 'dsh_restart_cancel'])
   const asked = host.requested.map(deps => deps.join('+')).sort()
-  assert.deepEqual(asked, ['sessionController', 'sessions', 'settings', 'webServer'])
+  assert.deepEqual(asked, ['schedule', 'settings', 'webServer'])
 })
 
 test('a previous restart wakes the session that asked for a note', async () => {
@@ -102,9 +105,24 @@ test('a previous restart wakes the session that asked for a note', async () => {
   assert.equal(host.followed.length, 1)
   assert.equal(host.followed[0].id, 'sess-1')
   assert.match(host.followed[0].text, /обновили библиотеку/)
-  assert.equal(host.followed[0].source.kind, 'graceful-restart')
-  assert.deepEqual(host.flushes, ['sess-1'])
+  assert.equal(host.followed[0].after, 0, 'the reminder is due at once')
+  assert.ok(host.followed[0].title.length > 0, 'a schedule task needs a title')
   assert.equal(existsSync(join(dir, 'pending.json')), false, 'a delivered note leaves no pending file')
+})
+
+test('a note whose service comes up late is still delivered, without another restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-late-'))
+  // sessionController appears after the first attempt has already given up:
+  // exactly what happened on this host, where the service arrived two seconds
+  // after the start-up delivery began.
+  const host = fakeHost({ delayServices: { schedule: 30 } })
+  writePending(dir, [{ id: '46', cause: 'поздний сервис', needNotify: true, sessionId: 'sess-9' }])
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 1 })
+  await wait(500)
+  assert.equal(host.followed.length, 1)
+  assert.equal(host.followed[0].id, 'sess-9')
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('need_notify off means no wake-up, and the file is cleared', async () => {
@@ -129,12 +147,13 @@ test('a pending file newer than this process is dropped: that restart never happ
 
 test('an undeliverable note is kept for the next question instead of being lost', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gr-retry-'))
-  const host = fakeHost({ resolve: () => ({ error: new Error('session is a subagent session') }) })
+  const host = fakeHost({ resolve: () => ({ error: new Error('schedule: subagent_session') }) })
   writePending(dir, [{ id: '45', cause: 'повод', needNotify: true, sessionId: 'sess-1' }])
   apply(host.ctx, { stateDir: dir, notifyDelayMs: 5 })
   await wait(200)
-  const kept = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
-  assert.equal(kept.records.length, 1)
+  // A subagent session can never be woken, so retrying forever would only hide
+  // it: the record is dropped with a warning.
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
   assert.equal(host.followed.length, 0)
   rmSync(dir, { recursive: true, force: true })
 })

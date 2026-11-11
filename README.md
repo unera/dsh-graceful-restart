@@ -143,11 +143,17 @@ the settings card is keyed by the bundle's package name.
 - The plugin does not watch HTTP requests, only agents. A user typing a follow-up
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.
-- The post-restart note reuses the mechanism `dsh-schedule` uses for reminders:
-  `sessionController.resolveAgent()` → an identified user message →
-  `sessions.flush()`. It is an ordinary turn, so it costs one model call —
-  that is the price of a notification the session can act on. Subagent sessions
-  are skipped: nothing wakes them.
+- The post-restart note is a durable one-shot **schedule task**, the same
+  mechanism cron uses for its reminders: `ctx.schedule.create(sessionId, {title,
+  prompt, after_seconds: 0})`. The schedule service owns the timer, resumes the
+  session itself and retries on its own terms, so this plugin never races host
+  start-up. It is an ordinary turn, so it costs one model call — the price of a
+  notification the session can act on. Subagent sessions are refused by the
+  service and skipped with a warning: nothing can wake them.
+- No IM plugin is involved: dsh-im has no part in the note. Whether the answer
+  ever reaches a chat is the IM plugin's own delivery setting.
+- A note that could not be placed yet is carried over to the next restart
+  instead of being erased by it.
 
 ## Кратко по-русски
 

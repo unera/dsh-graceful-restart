@@ -15,15 +15,15 @@
  *   - `dsh_restart_cancel(id)` drops one request; the restart is cancelled only
  *     once every registered request is gone.
  *
- * The delivery of a post-restart note reuses the mechanism `dsh-schedule`
- * uses for its reminders: `sessionController.resolveAgent()` → an identified
- * user message → `sessions.flush()`. The note therefore survives the restart
- * as an ordinary turn in the session instead of a webhook nobody reads.
+ * A post-restart note is a durable schedule task: `ctx.schedule.create()` bound
+ * to the session that asked for it, exactly how cron delivers its reminders. The
+ * note therefore survives the restart as a one-shot reminder the schedule service
+ * delivers on its own, with no dependency on dsh-im and no race against the
+ * host's start-up order.
  *
  * @module dsh-graceful-restart
  */
 
-import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -43,11 +43,19 @@ const POLL_MS = 1000
 /** Path the settings card polls for uptime and the quiet-window counters. */
 export const STATUS_PATH = '/api/graceful-restart/status'
 
-/** Retries for waking a session after the restart: services come up asynchronously. */
-const NOTIFY_ATTEMPTS = 8
+/** How long a note keeps trying to reach its session before it is kept for later. */
+const NOTIFY_DEADLINE_MS = 20000
 
-/** Delay between notify attempts. */
+/** How often a note re-checks whether the schedule service has come up yet. */
+const NOTIFY_POLL_MS = 250
+
+/** Delay between attempts against a service that is up but refusing. */
 const NOTIFY_RETRY_MS = 2000
+
+/** Sleep that never keeps the process alive on its own. */
+function sleep (ms) {
+  return new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.() })
+}
 
 const DEFAULT_QUIET_SECONDS = 10
 
@@ -117,6 +125,7 @@ const DICT = {
     cancelledAll: 'Request {id} is cancelled. No requests are left, so the restart is cancelled too.',
     cancelMissing: 'No pending restart request has id {id}. Nothing was cancelled. Call dsh_restart to register a new one.',
     badExit: 'Nothing was registered: exit method "command" cannot end the host while the exit command is empty, so the request would only die in the log. Set the command on the plugin page (Plugins → dsh-graceful-restart), or switch the exit method to systemctl.',
+    notifyTitle: 'DSH restarted on request',
     notify: '🔁 The DSH host restarted on request ({causes}). The process is up again — continue the work you were doing.',
     notifyCauseSeparator: '; ',
     noCause: 'no cause given',
@@ -148,6 +157,7 @@ const DICT = {
     cancelledAll: 'Заявка {id} снята. Других заявок нет, поэтому перезапуск отменён.',
     cancelMissing: 'Заявки с id {id} нет. Ничего не отменено. Вызови dsh_restart, чтобы зарегистрировать новую.',
     badExit: 'Заявка не создана: способ выхода "command" не может завершить хост, пока команда пуста — заявка умерла бы только в логе. Заполни команду на странице плагина (Плагины → dsh-graceful-restart) или переключи способ на systemctl.',
+    notifyTitle: 'DSH перезапущен по запросу',
     notify: '🔁 DSH перезапущен по запросу ({causes}). Процесс снова работает — можно продолжать работу.',
     notifyCauseSeparator: '; ',
     noCause: 'причина не указана',
@@ -179,6 +189,7 @@ const DICT = {
     cancelledAll: '请求 {id} 已撤销。没有其他请求，因此重启也一并取消。',
     cancelMissing: '没有 id 为 {id} 的待处理请求，未做任何撤销。请调用 dsh_restart 重新登记。',
     badExit: '未登记：退出方式为 "command" 但命令为空，宿主无法结束，请求只会死在日志里。请在插件页面（插件 → dsh-graceful-restart）填写命令，或把退出方式改为 systemctl。',
+    notifyTitle: 'DSH 已按请求重启',
     notify: '🔁 DSH 已按请求重启（原因：{causes}）。进程已恢复，可以继续工作。',
     notifyCauseSeparator: '；',
     noCause: '未说明原因',
@@ -437,27 +448,6 @@ export function exitPlan (options) {
   }
 }
 
-/**
- * Build one identified user-role message carrying the post-restart note.
- *
- * Written here instead of importing `createUserMessage` from
- * `@deepseek-ai/dsh-llm`: a profile plugin cannot resolve that package on this
- * installation, and the message contract is three fields. The source kind is
- * the plugin's own, like `schedule` does for its reminders — unknown kinds are
- * part of the contract, consumers fall through them.
- *
- * @param text - the note itself.
- * @returns a frozen user message with a fresh identity.
- */
-export function noticeMessage (text) {
-  return Object.freeze({
-    id: randomUUID(),
-    role: 'user',
-    content: Object.freeze([Object.freeze({ type: 'text', text })]),
-    source: Object.freeze({ kind: 'graceful-restart' }),
-  })
-}
-
 /** Start a detached command that outlives this process. */
 export function spawnDetached (command, args) {
   const child = spawn(command, args, { detached: true, stdio: 'ignore' })
@@ -659,8 +649,7 @@ export function apply (ctx, config = {}) {
   // the uptime route and the post-restart note went missing once. Every optional
   // service is taken through `inject`, and its disappearance is undone with it.
   let liveSettings = null
-  let control = null
-  let sessions = null
+  let scheduling = null
 
   const options = () => {
     const live = settingsSectionOf(liveSettings)
@@ -725,13 +714,24 @@ export function apply (ctx, config = {}) {
       return false
     }
     log('info', `restarting now; causes: ${causes}`)
+    // Notes kept from an earlier restart ride along: a note that could not be
+    // placed yet must not be erased by the next restart, or the session that
+    // asked for it is forgotten for good.
+    let carried = []
+    try {
+      if (existsSync(pendingFile())) {
+        const previous = JSON.parse(readFileSync(pendingFile(), 'utf8'))
+        carried = Array.isArray(previous?.records) ? previous.records : []
+      }
+    } catch {}
+    const merged = [...carried.filter(old => old?.id && !records.some(fresh => fresh.id === old.id)), ...records]
     try {
       mkdirSync(stateDir(), { recursive: true })
       writeFileSync(pendingFile(), `${JSON.stringify({
         version: 1,
         restartedAt: new Date().toISOString(),
         causes,
-        records,
+        records: merged,
       }, null, 2)}\n`)
     } catch (error) {
       log('warn', `cannot persist the pending notifications: ${error?.message ?? error}`)
@@ -761,33 +761,71 @@ export function apply (ctx, config = {}) {
     return true
   }
 
-  /** Wake one session with the post-restart note. */
-  async function wake (sessionId, text) {
-    if (!control || typeof control.resolveAgent !== 'function') {
-      log('warn', 'sessionController is not available here: the note has nowhere to go')
-      return false
+  /**
+   * Place one durable one-shot reminder on the session that asked for a note.
+   *
+   * The reminder is a schedule task — the same mechanism cron uses for its own
+   * deliveries. `ScheduleService` owns the timer, resumes the session itself and
+   * retries on its own terms, so this plugin no longer races session start-up:
+   * it asks, and the service answers when it can.
+   *
+   * @param record - the request that asked for a note.
+   * @param dict - the dictionary of the configured language.
+   * @returns true when the reminder exists (placed, or refused for good), false to keep it for later.
+   */
+  async function placeReminder (record, dict) {
+    const d = dict()
+    const request = {
+      title: d.notifyTitle,
+      prompt: format(d.notify, { causes: record.cause ? String(record.cause) : d.noCause }),
+      after_seconds: 0,
     }
-    for (let attempt = 1; attempt <= NOTIFY_ATTEMPTS; attempt += 1) {
+    const deadline = Date.now() + NOTIFY_DEADLINE_MS
+    let announced = false
+    while (Date.now() < deadline) {
+      if (!scheduling || typeof scheduling.create !== 'function') {
+        if (!announced) {
+          announced = true
+          log('info', 'schedule service is not up yet; waiting for it before placing the reminder')
+        }
+        await sleep(NOTIFY_POLL_MS)
+        continue
+      }
       try {
-        const resolved = await control.resolveAgent(sessionId)
-        if (resolved?.error) throw resolved.error
-        const agent = resolved?.agent
-        if (!agent) throw new Error('resolveAgent returned no agent')
-        agent.followup(noticeMessage(text))
-        if (sessions && typeof sessions.flush === 'function') await sessions.flush(agent.session)
+        await scheduling.create(String(record.sessionId), request)
+        log('info', `reminder placed for session ${record.sessionId}`)
         return true
       } catch (error) {
-        const last = attempt === NOTIFY_ATTEMPTS
-        log(last ? 'warn' : 'info', `notify ${sessionId} attempt ${attempt} failed: ${error?.message ?? error}`)
-        if (last) return false
-        await new Promise(resolve => { const t = setTimeout(resolve, NOTIFY_RETRY_MS); t.unref?.() })
+        const message = String(error?.message ?? error)
+        if (/subagent/i.test(message)) {
+          // A delegated child has no delivery path at all; retrying forever would
+          // only hide that fact.
+          log('warn', `cannot wake ${record.sessionId}: ${message}`)
+          return true
+        }
+        log('info', `reminder for ${record.sessionId} not placed yet: ${message}`)
+        await sleep(NOTIFY_RETRY_MS)
       }
     }
+    log('warn', `gave up on the reminder for ${record.sessionId} after ${Math.round(NOTIFY_DEADLINE_MS / 1000)}s`)
     return false
   }
 
+  /** Guards against a second delivery running beside the first (start timer, service arrival). */
+  let delivering = false
+
   /** Read the pending file of a previous life, log its causes and wake the sessions. */
   async function deliverPending () {
+    if (delivering) return
+    delivering = true
+    try {
+      await deliverPendingOnce()
+    } finally {
+      delivering = false
+    }
+  }
+
+  async function deliverPendingOnce () {
     let state
     try {
       if (!existsSync(pendingFile())) return
@@ -813,10 +851,11 @@ export function apply (ctx, config = {}) {
         log('info', `notification for request ${record?.id ?? '?'} skipped: ${record?.needNotify === true ? 'no session id' : 'need_notify was off'}`)
         continue
       }
-      const text = format(d.notify, { causes: record.cause ? String(record.cause) : d.noCause })
-      const ok = await wake(String(record.sessionId), text)
-      log(ok ? 'info' : 'warn', `notification for session ${record.sessionId}: ${ok ? 'delivered' : 'not delivered'}`)
-      if (!ok) keep.push(record)
+      const ok = await placeReminder(record, dict)
+      if (!ok) {
+        log('warn', `notification for session ${record.sessionId} stayed pending`)
+        keep.push(record)
+      }
     }
     try {
       if (keep.length === 0) rmSync(pendingFile(), { force: true })
@@ -871,15 +910,16 @@ export function apply (ctx, config = {}) {
     return () => { liveSettings = null }
   })
 
-  ctx.inject(['sessionController'], child => {
-    control = child.sessionController
-    log('info', 'sessionController available: post-restart notes can be delivered')
-    return () => { control = null }
-  })
-
-  ctx.inject(['sessions'], child => {
-    sessions = child.sessions
-    return () => { sessions = null }
+  ctx.inject(['schedule'], child => {
+    scheduling = child.schedule
+    log('info', 'schedule service available: post-restart notes become reminders')
+    // A note still waiting for this service gets its second chance here instead
+    // of waiting for the next restart.
+    if (existsSync(pendingFile())) {
+      const retry = setTimeout(() => { void deliverPending() }, 250)
+      retry.unref?.()
+    }
+    return () => { scheduling = null }
   })
 
   // Tools are registered globally, so every agent — the main session and every
