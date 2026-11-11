@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-graceful-restart",
+	id: "@dr-co/dsh-graceful-restart",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -7,6 +7,10 @@ window.__ModuleLoader__.load({
 		var h = React.createElement;
 
 		var NS = "dsh-graceful-restart";
+		// The bundle package name keys the config slot on the Plugins page; the
+		// settings namespace is the short Loader entry id. Scoping the package
+		// splits the two, so both are spelled out.
+		var PACKAGE = "@dr-co/dsh-graceful-restart";
 		var ENTRY = "dsh-graceful-restart";
 		var STATUS_PATH = "/api/graceful-restart/status";
 
@@ -134,7 +138,7 @@ window.__ModuleLoader__.load({
 				ctx.slots.inject("plugins.bundle.config", function() {
 					return ctx.slots.register({
 						name: "plugins.bundle.config",
-						key: ENTRY,
+						key: PACKAGE,
 						inject: function() { return { scope: scope }; },
 					}, Card);
 				});

@@ -1,6 +1,6 @@
 {
-  "name": "dsh-graceful-restart",
-  "version": "0.1.8",
+  "name": "@dr-co/dsh-graceful-restart",
+  "version": "1.0.0",
   "description": "Graceful, idle-aware restart of the DSH host: dsh_restart registers a request that waits for every agent (subagents included) to finish, logs the causes, ends the process after a quiet window, and wakes the sessions that asked for a note once the host is up again.",
   "type": "module",
   "main": "./index.mjs",
@@ -68,6 +68,7 @@
     "url": "git+https://github.com/unera/dsh-graceful-restart.git"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

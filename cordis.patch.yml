@@ -1,4 +1,4 @@
-# Bundle layer for dsh-graceful-restart.
+# Bundle layer for @dr-co/dsh-graceful-restart.
 #
 # The row id must equal the package name: the client-modules scan matches the
 # Loader specifier against the nearest manifest name, and the config form on the
@@ -6,4 +6,4 @@
 # the tools working and silently drop the settings card.
 - insert:
     - id: dsh-graceful-restart
-      name: 'dsh-graceful-restart'
+      name: '@dr-co/dsh-graceful-restart'

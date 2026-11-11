@@ -105,21 +105,27 @@ the host has a `webServer` service.
 ## Install
 
 ```bash
-dsh plugin add github:unera/dsh-graceful-restart
+dsh plugin add @dr-co/dsh-graceful-restart
 ```
 
 Or pin the bundle in the profile (`~/.dsh/profiles/web/package.json`):
 
 ```json
 {
-  "dependencies": { "dsh-graceful-restart": "github:unera/dsh-graceful-restart" },
-  "dsh": { "profile": { "bundles": ["dsh-graceful-restart"] } }
+  "dependencies": { "@dr-co/dsh-graceful-restart": "^1.0.0" },
+  "dsh": { "profile": { "bundles": ["@dr-co/dsh-graceful-restart"] } }
 }
 ```
 
-The row id in `cordis.patch.yml` must stay equal to the package name: the
-client-modules scan matches the Loader specifier against the manifest name, and
-the settings card is keyed by the bundle's package name.
+Two identities in `cordis.patch.yml`, and both are load-bearing:
+
+- `name` is the module specifier and must equal `package.json` `name`, because the
+  client-modules scan matches the nearest manifest name against it — that is how
+  the browser card gets loaded at all;
+- `id` is the Loader entry, and the settings namespace *is* the entry id (the
+  settings service answers `Plugin entry <id> has no volatile fields`, and the
+  Plugins page writes a bundle's values into `cordis.patch.yml` under this id).
+  It stays short: `dsh-graceful-restart`.
 
 ## Notes
 
