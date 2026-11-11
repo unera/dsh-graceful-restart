@@ -230,6 +230,49 @@ window.__ModuleLoader__.load({
 				);
 			}
 
+			// A pill switch, drawn with the same design tokens the host UI uses for
+			// its own toggles: a native checkbox reads as another application.
+			function Switch(props) {
+				var on = props.checked === true;
+				var disabled = props.writable !== true;
+				return h("button", {
+					type: "button",
+					role: "switch",
+					"aria-checked": on,
+					"aria-label": props.ariaLabel || "",
+					disabled: disabled,
+					style: {
+						flex: "0 0 auto",
+						width: "38px",
+						height: "22px",
+						padding: 0,
+						boxSizing: "border-box",
+						position: "relative",
+						cursor: disabled ? "default" : "pointer",
+						borderRadius: "999px",
+						border: "1px solid transparent",
+						background: on ? "var(--dsw-alias-bg-brand, #3a76f0)" : "var(--dsw-alias-bg-module-platform, rgba(127,127,127,.28))",
+						opacity: disabled ? 0.55 : 1,
+						transition: "background .16s ease, opacity .16s ease",
+					},
+					onClick: function() { props.onToggle(!on); },
+				}, h("span", {
+					style: {
+						position: "absolute",
+						top: "1px",
+						left: "1px",
+						width: "18px",
+						height: "18px",
+						borderRadius: "999px",
+						boxSizing: "border-box",
+						background: "var(--dsw-alias-label-inverse, #fff)",
+						boxShadow: "0 1px 2px rgba(0,0,0,.35)",
+						transform: on ? "translateX(16px)" : "translateX(0)",
+						transition: "transform .16s ease",
+					},
+				}));
+			}
+
 			function formatDuration(ms) {
 				var total = Math.max(0, Math.floor(ms / 1000));
 				var days = Math.floor(total / 86400);
@@ -269,12 +312,11 @@ window.__ModuleLoader__.load({
 						return h("option", { key: option.value, value: option.value }, option.label);
 					}));
 				} else if (field.kind === "bool") {
-					input = h("input", {
-						type: "checkbox",
+					input = h(Switch, {
 						checked: props.value === true,
-						disabled: disabled,
-						style: { width: "18px", height: "18px", cursor: disabled ? "default" : "pointer" },
-						onChange: function(event) { commit(props.scope, field.key, event.target.checked === true); },
+						writable: props.writable,
+						ariaLabel: t2(field.key),
+						onToggle: function(next) { commit(props.scope, field.key, next); },
 					});
 				} else if (field.kind === "number") {
 					input = h("input", {
