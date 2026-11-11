@@ -1,6 +1,6 @@
 {
   "name": "@dr-co/dsh-graceful-restart",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Graceful, idle-aware restart of the DSH host: dsh_restart registers a request that waits for every agent (subagents included) to finish, logs the causes, ends the process after a quiet window, and wakes the sessions that asked for a note once the host is up again.",
   "type": "module",
   "main": "./index.mjs",

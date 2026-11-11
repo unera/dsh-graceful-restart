@@ -82,9 +82,6 @@ export const Config = z.object({
   reasonFile: z.string().default('')
     .description('Optional file that receives the causes before the restart, one line. On this host /home/dsh/.cache/dsh-restart-reason.txt is read by the start-up report.')
     .volatile(),
-  waitForJobs: z.boolean().default(false)
-    .description('Hold the restart while a background job (run_in_background, job_*) is running. Off by default: a long-lived job such as a dev server would otherwise postpone the restart forever.')
-    .volatile(),
   language: z.string().default('en')
     .description('Language of tool descriptions, tool answers and the post-restart note: en (default), ru, zh.')
     .volatile(),
@@ -232,7 +229,6 @@ export function normalizeConfig (raw) {
     exitCommand: text(value.exitCommand, ''),
     quietSeconds: number(value.quietSeconds, DEFAULT_QUIET_SECONDS),
     reasonFile: text(value.reasonFile, ''),
-    waitForJobs: value.waitForJobs === true,
     language: text(value.language, 'en') || 'en',
     stateDir: text(value.stateDir, ''),
   }
@@ -295,7 +291,6 @@ export class RestartQueue {
     pollMs = POLL_MS,
     listAgents = () => [],
     listJobs = () => [],
-    waitForJobs = () => false,
     onReady = () => {},
     log = () => {},
     now = () => Date.now(),
@@ -306,7 +301,6 @@ export class RestartQueue {
     this.pollMs = pollMs
     this.listAgents = listAgents
     this.listJobs = listJobs
-    this.waitForJobs = waitForJobs
     this.onReady = onReady
     this.log = log
     this.now = now
@@ -387,9 +381,9 @@ export class RestartQueue {
     const appeared = [...ids].some(id => id && !this.seen.has(id))
     this.seen = ids
     const running = agents.filter(agent => agent.status === 'running').map(agent => String(agent.id ?? ''))
-    // Background jobs are work too, but only when the human asked them to count:
-    // a dev server that never ends must not postpone the restart forever.
-    const jobs = this.waitForJobs() ? (this.listJobs() || []).filter(job => job && (job.status === 'running' || job.status === 'stopping')) : []
+    // A background job is work that a restart would kill mid-flight, so it holds
+    // the window exactly like a running agent. Never interruptable, no setting.
+    const jobs = (this.listJobs() || []).filter(job => job && (job.status === 'running' || job.status === 'stopping'))
     for (const job of jobs) {
       const jobId = String(job.id ?? job.label ?? 'job')
       if (!this.notedJobs.has(jobId)) {
@@ -747,7 +741,6 @@ export function apply (ctx, config = {}) {
     quietMs: () => options().quietSeconds * 1000,
     listAgents: () => ctx.agents.list(),
     listJobs: () => runningJobs(),
-    waitForJobs: () => options().waitForJobs,
     log,
     now: () => Date.now(),
     onReady: records => finish(records),
@@ -972,7 +965,7 @@ export function apply (ctx, config = {}) {
 
   ctx.inject(['jobs'], child => {
     jobRegistry = child.jobs
-    log('info', 'jobs service available: the job option can hold a restart')
+    log('info', 'jobs service available: a running job holds a restart')
     return () => { jobRegistry = null }
   })
 

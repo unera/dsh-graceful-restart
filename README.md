@@ -11,8 +11,8 @@ is running.
 
 1. `dsh_restart` registers a request with its own id and returns at once. The
    agent is told, in plain words, not to wait for it.
-2. A watcher polls every live agent (subagents included) once a second. While
-   anything is `running`, nothing happens.
+2. A watcher polls every live agent (subagents included) and every background job
+   once a second. While anything is `running`, nothing happens.
 3. When nothing is running it opens a **quiet window** (`quietSeconds`, default
    10) and keeps re-checking every second that no new session appeared. A new
    session — or work that starts again — restarts the window.
@@ -81,7 +81,6 @@ the settings service persists). Language: English, Russian, Chinese.
 | `serviceUnit` | `dsh-server` | Unit restarted by `systemctl`. |
 | `exitCommand` | — | Shell command for `command`, started detached from the dying process. |
 | `quietSeconds` | `10` | How long the host must stay idle after the last activity, re-checked every second. |
-| `waitForJobs` | `false` | Hold the restart while a background job (`run_in_background`, `job_*`) is running or stopping. Off by default on purpose: a dev server that never ends would postpone the restart forever. When it is on, the job id and label are logged once, and they are counted in the card's status line. |
 | `reasonFile` | — | Optional file that receives the causes before the restart, one line. On a host where the unit's `ExecStartPost` prints a start-up report, point this at the file that report reads (for example `/home/dsh/.cache/dsh-restart-reason.txt`). |
 | `language` | `en` | Language of tool descriptions, tool answers and the post-restart note: `en`, `ru`, `zh`. |
 | `stateDir` | `$DSH_HOME/graceful-restart` | Requests, event log and pending notifications. |
@@ -147,7 +146,7 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
 - A `pending.json` newer than the running process is dropped at start: it can
   only come from an exit that never happened, and announcing that restart would
   be a lie.
-- Background jobs are opt-in: with `waitForJobs` off a restart kills them silently. `ctx.jobs.list()` without a caller returns only *unowned* jobs (the registry filters by `job.owner === caller`), so the plugin collects session-owned ones per live agent.
+- Background jobs are never interrupted: a job in `running` or `stopping` holds the quiet window exactly like a running agent, and the job id and label are logged once. There is no setting to override it — a restarting host would kill the job mid-flight. `ctx.jobs.list()` without a caller returns only *unowned* jobs (the registry filters by `job.owner === caller`), so session-owned ones are collected per live agent.
 - The plugin does not watch HTTP requests, only agents. A user typing a follow-up
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.
