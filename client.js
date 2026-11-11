@@ -30,6 +30,9 @@ window.__ModuleLoader__.load({
 				"reasonFile.hint": "Optional file that receives the causes before the restart, one line.",
 				"waitForJobs": "Wait for background jobs",
 				"waitForJobs.hint": "Hold the restart while a background job is running. Off by default: a dev server that never ends would postpone the restart forever.",
+				"notifyJobOwners": "Notify the job owner about the restart",
+				"notifyJobOwners.hint": "After the host is up, the session that started a background job gets one note listing every job of its own that the restart killed. One note per session, however many jobs.",
+				"notifyJobOwners.hintOff": "Unavailable while \"Wait for background jobs\" is on: then the restart waits for the jobs instead of killing them.",
 				"language": "Language",
 				"language.hint": "Language of tool descriptions, tool answers and the post-restart note.",
 				"readonly": "Configuration is read-only here.",
@@ -56,6 +59,9 @@ window.__ModuleLoader__.load({
 				"reasonFile.hint": "Необязательный файл, куда перед перезапуском пишутся причины одной строкой.",
 				"waitForJobs": "Ждать завершение job",
 				"waitForJobs.hint": "Держать перезапуск, пока работает фоновая задача. По умолчанию выключено: вечный процесс вроде dev-сервера иначе отложит перезапуск навсегда.",
+				"notifyJobOwners": "Уведомлять запустившего job агента о перезапуске",
+				"notifyJobOwners.hint": "После подъёма хоста сессия, запустившая фоновую задачу, получит записку со списком всех своих задач, которые оборвал перезапуск. Одна записка на сессию, сколько бы задач ни было.",
+				"notifyJobOwners.hintOff": "Недоступно, пока включено «Ждать завершение job»: тогда перезапуск дожидается задач, а не обрывает их.",
 				"language": "Язык",
 				"language.hint": "Язык описаний инструментов, ответов инструментов и записки после перезапуска.",
 				"readonly": "Настройки доступны только для чтения.",
@@ -82,6 +88,9 @@ window.__ModuleLoader__.load({
 				"reasonFile.hint": "可选：重启前把原因写成一行写入该文件。",
 				"waitForJobs": "等待后台任务结束",
 				"waitForJobs.hint": "有后台任务运行时暂缓重启。默认关闭：常驻进程（如开发服务器）否则会无限推迟重启。",
+				"notifyJobOwners": "重启后通知任务发起者",
+				"notifyJobOwners.hint": "宿主恢复后，发起后台任务的会话会收到一条消息，列出被重启中断的全部任务。每个会话只发一条，无论任务多少。",
+				"notifyJobOwners.hintOff": "开启「等待后台任务结束」时不可用：此时重启会等任务结束，而不是中断它们。",
 				"language": "语言",
 				"language.hint": "工具描述、工具回复以及重启后消息的语言。",
 				"readonly": "此处配置为只读。",
@@ -167,6 +176,7 @@ window.__ModuleLoader__.load({
 						key: field.key,
 						field: field,
 						value: value[field.key],
+						form: value,
 						writable: writable,
 						scope: bound,
 						t: t,
@@ -293,10 +303,16 @@ window.__ModuleLoader__.load({
 			function Row(props) {
 				var field = props.field;
 				var t2 = props.t;
-				var disabled = props.writable !== true;
+				var form = props.form || {};
+				// A field can be pointless in some configurations — notifying the owner
+				// of a job makes no sense while the restart waits for jobs instead of
+				// killing them. Such a field stays visible but cannot be switched.
+				var locked = field.disabled ? field.disabled(form) === true : false;
+				var disabled = props.writable !== true || locked;
+				var hint = field.hintKey ? field.hintKey(form) : field.key + ".hint";
 				var label = h("div", { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
 					h("span", { style: { fontSize: "13px", color: "var(--dsw-alias-label-primary, inherit)" } }, t2(field.key)),
-					h("span", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))" } }, t2(field.key + ".hint")),
+					h("span", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))" } }, t2(hint)),
 				);
 				var input;
 				if (field.kind === "select") {
@@ -314,7 +330,7 @@ window.__ModuleLoader__.load({
 				} else if (field.kind === "bool") {
 					input = h(Switch, {
 						checked: props.value === true,
-						writable: props.writable,
+						writable: props.writable === true && !locked,
 						ariaLabel: t2(field.key),
 						onToggle: function(next) { commit(props.scope, field.key, next); },
 					});
@@ -339,7 +355,7 @@ window.__ModuleLoader__.load({
 						onChange: function(event) { commit(props.scope, field.key, event.target.value); },
 					});
 				}
-				return h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "6px 0", borderTop: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2))" } },
+				return h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "6px 0", borderTop: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2))", opacity: locked ? 0.6 : 1 } },
 					label,
 					h("div", { style: { flex: "0 0 auto", minWidth: "180px" } }, input),
 				);
@@ -385,6 +401,11 @@ window.__ModuleLoader__.load({
 			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server", visible: function(value) { return value.exitMethod === "command"; } },
 			{ key: "quietSeconds", kind: "number" },
 			{ key: "waitForJobs", kind: "bool" },
+			// Meaningless next to a restart that waits for the jobs: greyed out, not hidden,
+			// so the option is discoverable before the other one is switched off.
+			{ key: "notifyJobOwners", kind: "bool",
+				disabled: function(value) { return value.waitForJobs === true; },
+				hintKey: function(value) { return value.waitForJobs === true ? "notifyJobOwners.hintOff" : "notifyJobOwners.hint"; } },
 			{ key: "reasonFile", kind: "text", placeholder: "/home/user/.cache/dsh-restart-reason.txt" },
 			{ key: "language", kind: "select", options: ["en", "ru", "zh"] },
 		];

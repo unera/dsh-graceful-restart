@@ -85,6 +85,9 @@ export const Config = z.object({
   waitForJobs: z.boolean().default(false)
     .description('Hold the restart while a background job (run_in_background, job_*) is running. Off by default: a long-lived job such as a dev server would otherwise postpone the restart forever.')
     .volatile(),
+  notifyJobOwners: z.boolean().default(true)
+    .description('Tell the session that started a background job that the restart killed it: after the host is up, each owning session gets one note listing every job of its own that the restart interrupted. Has no effect while waitForJobs is on, because then no job is killed (the card greys it out).')
+    .volatile(),
   language: z.string().default('en')
     .description('Language of tool descriptions, tool answers and the post-restart note: en (default), ru, zh.')
     .volatile(),
@@ -132,6 +135,14 @@ const DICT = {
     notify: '🔁 The DSH host restarted on request ({causes}). The process is up again — continue the work you were doing.',
     notifyCauseSeparator: '; ',
     noCause: 'no cause given',
+    jobLossTitle: 'DSH restarted: background jobs were cut off',
+    jobLossIntro: '⚠️ The restart cut off {count} background job(s) of this session, so their results are lost. Check what they managed to do and start them again if that work still matters.',
+    jobLossLine: '• {id} ({kind}), "{label}", ran for {elapsed}',
+    jobLossLineNoLabel: '• {id} ({kind}), ran for {elapsed}',
+    jobLossKind: 'job',
+    elapsedSeconds: '{n}s',
+    elapsedMinutes: '{m}m {s}s',
+    elapsedHours: '{h}h {m}m',
   },
   ru: {
     restartTitle: 'Перезапустить DSH, когда он освободится',
@@ -164,6 +175,14 @@ const DICT = {
     notify: '🔁 DSH перезапущен по запросу ({causes}). Процесс снова работает — можно продолжать работу.',
     notifyCauseSeparator: '; ',
     noCause: 'причина не указана',
+    jobLossTitle: 'DSH перезапущен: фоновые задачи оборваны',
+    jobLossIntro: '⚠️ Из-за перезапуска оборвано фоновых задач: {count}. Их результат потерян — проверь, что они успели сделать, и запусти заново, если работа ещё нужна.',
+    jobLossLine: '• {id} ({kind}), «{label}», работала {elapsed}',
+    jobLossLineNoLabel: '• {id} ({kind}), работала {elapsed}',
+    jobLossKind: 'задача',
+    elapsedSeconds: '{n} с',
+    elapsedMinutes: '{m} мин {s} с',
+    elapsedHours: '{h} ч {m} мин',
   },
   zh: {
     restartTitle: '空闲时重启 DSH 宿主',
@@ -196,6 +215,14 @@ const DICT = {
     notify: '🔁 DSH 已按请求重启（原因：{causes}）。进程已恢复，可以继续工作。',
     notifyCauseSeparator: '；',
     noCause: '未说明原因',
+    jobLossTitle: 'DSH 已重启：后台任务被中断',
+    jobLossIntro: '⚠️ 重启中断了本会话的 {count} 个后台任务，结果已丢失。请检查它们完成了多少，如仍需继续就重新启动。',
+    jobLossLine: '• {id}（{kind}）“{label}”，运行了 {elapsed}',
+    jobLossLineNoLabel: '• {id}（{kind}），运行了 {elapsed}',
+    jobLossKind: '任务',
+    elapsedSeconds: '{n} 秒',
+    elapsedMinutes: '{m} 分 {s} 秒',
+    elapsedHours: '{h} 小时 {m} 分',
   },
 }
 
@@ -233,6 +260,7 @@ export function normalizeConfig (raw) {
     quietSeconds: number(value.quietSeconds, DEFAULT_QUIET_SECONDS),
     reasonFile: text(value.reasonFile, ''),
     waitForJobs: value.waitForJobs === true,
+    notifyJobOwners: value.notifyJobOwners !== false,
     language: text(value.language, 'en') || 'en',
     stateDir: text(value.stateDir, ''),
   }
@@ -249,6 +277,118 @@ export function resolveStateDir (options, env = process.env) {
 export function causesOf (records, dict = DICT.en) {
   const causes = records.map(record => String(record.cause ?? '').trim()).filter(Boolean)
   return causes.length === 0 ? dict.noCause : causes.join(dict.notifyCauseSeparator)
+}
+
+/**
+ * How long a job had been running when the restart took it, in the units of the
+ * dictionary: seconds below a minute, minutes below an hour, hours above.
+ * @param {number} ms - elapsed milliseconds.
+ * @param {object} [dict] - dictionary of the configured language.
+ * @returns {string} human duration.
+ */
+export function elapsedText (ms, dict = DICT.en) {
+  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  if (hours > 0) return format(dict.elapsedHours, { h: hours, m: minutes })
+  if (minutes > 0) return format(dict.elapsedMinutes, { m: minutes, s: seconds })
+  return format(dict.elapsedSeconds, { n: seconds })
+}
+
+/**
+ * Fold two job-loss lists into one, one entry per session.
+ *
+ * Merging matters twice: a note that could not be placed yet is carried into the
+ * next restart's pending file, and the same job must not be announced twice. The
+ * note is per session and lists every job of that session, so the plugin never
+ * sends three notes for three jobs.
+ *
+ * @param {Array<{sessionId: string, jobs: object[]}>} carried - entries from an earlier restart.
+ * @param {Array<{sessionId: string, jobs: object[]}>} fresh - entries of this restart.
+ * @returns {Array<{sessionId: string, jobs: object[]}>} merged entries, jobs deduplicated by id.
+ */
+export function mergeJobLoss (carried = [], fresh = []) {
+  const merged = []
+  const index = new Map()
+  for (const group of [...(Array.isArray(carried) ? carried : []), ...(Array.isArray(fresh) ? fresh : [])]) {
+    const sessionId = typeof group?.sessionId === 'string' ? group.sessionId : ''
+    const jobs = Array.isArray(group?.jobs) ? group.jobs.filter(job => job && job.id) : []
+    if (!sessionId || jobs.length === 0) continue
+    let entry = index.get(sessionId)
+    if (!entry) {
+      entry = { sessionId, jobs: [] }
+      index.set(sessionId, entry)
+      merged.push(entry)
+    }
+    for (const job of jobs) {
+      if (!entry.jobs.some(seen => String(seen.id) === String(job.id))) entry.jobs.push(job)
+    }
+  }
+  return merged
+}
+
+/**
+ * Turn the pending records and the job-loss entries into the notes to place.
+ *
+ * One note per session, always: a session that asked for a wake-up and also lost
+ * two jobs gets a single reminder that says both, instead of three messages that
+ * arrive in an arbitrary order.
+ *
+ * @param {{records?: object[], jobLoss?: object[]}} pending - what the previous life persisted.
+ * @param {object} [dict] - dictionary of the configured language.
+ * @returns {Array<{sessionId: string, title: string, prompt: string}>} notes, one per session.
+ */
+export function composeNotes ({ records = [], jobLoss = [] } = {}, dict = DICT.en) {
+  const d = dict
+  const notes = new Map()
+  const of = sessionId => {
+    let entry = notes.get(sessionId)
+    if (!entry) {
+      entry = { sessionId, causes: [], requested: false, jobs: [] }
+      notes.set(sessionId, entry)
+    }
+    return entry
+  }
+  for (const record of Array.isArray(records) ? records : []) {
+    const sessionId = typeof record?.sessionId === 'string' ? record.sessionId : ''
+    if (record?.needNotify !== true || !sessionId) continue
+    const entry = of(sessionId)
+    entry.requested = true
+    const cause = String(record.cause ?? '').trim()
+    if (cause && !entry.causes.includes(cause)) entry.causes.push(cause)
+  }
+  for (const group of mergeJobLoss([], jobLoss)) {
+    const entry = of(group.sessionId)
+    for (const job of group.jobs) entry.jobs.push(job)
+  }
+  const out = []
+  for (const entry of notes.values()) {
+    const parts = []
+    if (entry.requested) {
+      parts.push(format(d.notify, { causes: entry.causes.join(d.notifyCauseSeparator) || d.noCause }))
+    }
+    if (entry.jobs.length > 0) {
+      const lines = entry.jobs.map(job => {
+        const label = String(job.label ?? '').trim()
+        const template = label ? d.jobLossLine : d.jobLossLineNoLabel
+        return format(template, {
+          id: String(job.id),
+          kind: String(job.kind ?? '').trim() || d.jobLossKind,
+          label,
+          elapsed: elapsedText(job.elapsedMs, d),
+        })
+      })
+      parts.push([format(d.jobLossIntro, { count: entry.jobs.length }), ...lines].join('\n'))
+    }
+    if (parts.length === 0) continue
+    out.push({
+      sessionId: entry.sessionId,
+      title: entry.requested ? d.notifyTitle : d.jobLossTitle,
+      prompt: parts.join('\n\n'),
+    })
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------- queue */
@@ -743,6 +883,37 @@ export function apply (ctx, config = {}) {
     return [...collected.values()]
   }
 
+  /**
+   * The jobs the restart is about to kill, grouped by the session that started them.
+   *
+   * `JobView.owner` is the owning session id and is absent only for an unowned
+   * job — there is no session to tell about that one, so it is skipped. The
+   * digest is written before the exit, because after it there is no registry
+   * left to ask.
+   *
+   * @returns {Array<{sessionId: string, jobs: object[]}>} one entry per owning session.
+   */
+  function jobLossSnapshot () {
+    const groups = new Map()
+    const now = Date.now()
+    for (const job of runningJobs()) {
+      const sessionId = typeof job.owner === 'string' ? job.owner : ''
+      if (!sessionId) continue
+      const startedAt = Number.isFinite(job.startedAt) ? job.startedAt : now
+      const list = groups.get(sessionId) ?? []
+      list.push({
+        id: String(job.id ?? job.label ?? 'job'),
+        kind: String(job.kind ?? ''),
+        label: String(job.label ?? ''),
+        status: String(job.status ?? ''),
+        startedAt,
+        elapsedMs: Math.max(0, now - startedAt),
+      })
+      groups.set(sessionId, list)
+    }
+    return [...groups].map(([sessionId, jobs]) => ({ sessionId, jobs }))
+  }
+
   const queue = new RestartQueue({
     quietMs: () => options().quietSeconds * 1000,
     listAgents: () => ctx.agents.list(),
@@ -761,6 +932,14 @@ export function apply (ctx, config = {}) {
     const current = options()
     const d = dict()
     const causes = causesOf(records, d)
+    // Whatever is still running at this instant dies with the process. The
+    // session that started it must learn that from a note, or its next turn
+    // reads the loss as a silent disappearance. Taken before anything durable is
+    // written: after the exit there is no registry left to ask.
+    const jobLoss = current.notifyJobOwners ? jobLossSnapshot() : []
+    for (const group of jobLoss) {
+      log('warn', `restart kills ${group.jobs.length} background job(s) of session ${group.sessionId}: ${group.jobs.map(job => job.id).join(', ')}`)
+    }
     let plan
     try {
       plan = exitPlan(current)
@@ -775,20 +954,24 @@ export function apply (ctx, config = {}) {
     // placed yet must not be erased by the next restart, or the session that
     // asked for it is forgotten for good.
     let carried = []
+    let carriedJobLoss = []
     try {
       if (existsSync(pendingFile())) {
         const previous = JSON.parse(readFileSync(pendingFile(), 'utf8'))
         carried = Array.isArray(previous?.records) ? previous.records : []
+        carriedJobLoss = Array.isArray(previous?.jobLoss) ? previous.jobLoss : []
       }
     } catch {}
     const merged = [...carried.filter(old => old?.id && !records.some(fresh => fresh.id === old.id)), ...records]
+    const mergedJobLoss = mergeJobLoss(carriedJobLoss, jobLoss)
     try {
       mkdirSync(stateDir(), { recursive: true })
       writeFileSync(pendingFile(), `${JSON.stringify({
-        version: 1,
+        version: 2,
         restartedAt: new Date().toISOString(),
         causes,
         records: merged,
+        jobLoss: mergedJobLoss,
       }, null, 2)}\n`)
     } catch (error) {
       log('warn', `cannot persist the pending notifications: ${error?.message ?? error}`)
@@ -826,15 +1009,13 @@ export function apply (ctx, config = {}) {
    * retries on its own terms, so this plugin no longer races session start-up:
    * it asks, and the service answers when it can.
    *
-   * @param record - the request that asked for a note.
-   * @param dict - the dictionary of the configured language.
+   * @param {{sessionId: string, title: string, prompt: string}} note - the note to place.
    * @returns true when the reminder exists (placed, or refused for good), false to keep it for later.
    */
-  async function placeReminder (record, dict) {
-    const d = dict()
+  async function placeReminder (note) {
     const request = {
-      title: d.notifyTitle,
-      prompt: format(d.notify, { causes: record.cause ? String(record.cause) : d.noCause }),
+      title: note.title,
+      prompt: note.prompt,
       // The service refuses zero: `after_seconds` must be a positive safe
       // integer, and one second is as close to "now" as a reminder gets.
       after_seconds: 1,
@@ -851,22 +1032,22 @@ export function apply (ctx, config = {}) {
         continue
       }
       try {
-        await scheduling.create(String(record.sessionId), request)
-        log('info', `reminder placed for session ${record.sessionId}`)
+        await scheduling.create(String(note.sessionId), request)
+        log('info', `reminder placed for session ${note.sessionId}`)
         return true
       } catch (error) {
         const message = String(error?.message ?? error)
         if (/subagent/i.test(message)) {
           // A delegated child has no delivery path at all; retrying forever would
           // only hide that fact.
-          log('warn', `cannot wake ${record.sessionId}: ${message}`)
+          log('warn', `cannot wake ${note.sessionId}: ${message}`)
           return true
         }
-        log('info', `reminder for ${record.sessionId} not placed yet: ${message}`)
+        log('info', `reminder for ${note.sessionId} not placed yet: ${message}`)
         await sleep(NOTIFY_RETRY_MS)
       }
     }
-    log('warn', `gave up on the reminder for ${record.sessionId} after ${Math.round(NOTIFY_DEADLINE_MS / 1000)}s`)
+    log('warn', `gave up on the reminder for ${note.sessionId} after ${Math.round(NOTIFY_DEADLINE_MS / 1000)}s`)
     return false
   }
 
@@ -902,23 +1083,36 @@ export function apply (ctx, config = {}) {
       return
     }
     const records = Array.isArray(state?.records) ? state.records : []
+    const jobLoss = Array.isArray(state?.jobLoss) ? state.jobLoss : []
     const d = dict()
     log('info', `previous run restarted at ${state?.restartedAt ?? 'unknown time'}; causes: ${causesOf(records, d)}`)
-    const keep = []
     for (const record of records) {
       if (record?.needNotify !== true || !record?.sessionId) {
         log('info', `notification for request ${record?.id ?? '?'} skipped: ${record?.needNotify === true ? 'no session id' : 'need_notify was off'}`)
-        continue
-      }
-      const ok = await placeReminder(record, dict)
-      if (!ok) {
-        log('warn', `notification for session ${record.sessionId} stayed pending`)
-        keep.push(record)
       }
     }
+    // One note per session, whatever the counts: the restart cause and every job
+    // of that session the restart killed go into the same message.
+    const notes = composeNotes({ records, jobLoss }, d)
+    const failed = new Set()
+    for (const note of notes) {
+      log('info', `notifying session ${note.sessionId} (${note.title})`)
+      const ok = await placeReminder(note)
+      if (!ok) {
+        failed.add(note.sessionId)
+        log('warn', `notification for session ${note.sessionId} stayed pending`)
+      }
+    }
+    // Only what was attempted and failed is kept: a session whose note is either
+    // placed or was never due must not hear about this restart again.
+    const keep = records.filter(record => record?.needNotify === true && record?.sessionId && failed.has(String(record.sessionId)))
+    const keepJobLoss = mergeJobLoss([], jobLoss).filter(group => failed.has(group.sessionId))
     try {
-      if (keep.length === 0) rmSync(pendingFile(), { force: true })
-      else writeFileSync(pendingFile(), `${JSON.stringify({ ...state, records: keep }, null, 2)}\n`)
+      if (keep.length === 0 && keepJobLoss.length === 0) {
+        rmSync(pendingFile(), { force: true })
+      } else {
+        writeFileSync(pendingFile(), `${JSON.stringify({ ...state, version: 2, records: keep, jobLoss: keepJobLoss }, null, 2)}\n`)
+      }
     } catch (error) {
       log('warn', `cannot rewrite ${pendingFile()}: ${error?.message ?? error}`)
     }
@@ -1020,4 +1214,4 @@ export function apply (ctx, config = {}) {
   log('info', `ready: exitMethod=${initial.exitMethod} quietSeconds=${initial.quietSeconds} language=${initial.language}`)
 }
 
-export default Object.freeze({ name, inject, apply, Config, normalizeConfig, RestartQueue, createTools, exitPlan })
+export default Object.freeze({ name, inject, apply, Config, normalizeConfig, RestartQueue, createTools, exitPlan, causesOf, composeNotes, mergeJobLoss, elapsedText })

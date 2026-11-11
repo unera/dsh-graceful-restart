@@ -82,6 +82,7 @@ the settings service persists). Language: English, Russian, Chinese.
 | `exitCommand` | — | Shell command for `command`, started detached from the dying process. |
 | `quietSeconds` | `10` | How long the host must stay idle after the last activity, re-checked every second. |
 | `waitForJobs` | `false` | Hold the restart while a background job (`run_in_background`, `job_*`) is running or stopping. Off by default on purpose: a dev server that never ends would postpone the restart forever. When it is on, the job id and label are logged once, and they are counted in the card's status line. |
+| `notifyJobOwners` | `true` | After the restart, tell each session whose background job the restart killed: one note per session, listing **all** of that session's interrupted jobs. The switch is greyed out in the card while `waitForJobs` is on — then the restart waits for the jobs instead of killing them, so there is nothing to report. |
 | `reasonFile` | — | Optional file that receives the causes before the restart, one line. On a host where the unit's `ExecStartPost` prints a start-up report, point this at the file that report reads (for example `/home/dsh/.cache/dsh-restart-reason.txt`). |
 | `language` | `en` | Language of tool descriptions, tool answers and the post-restart note: `en`, `ru`, `zh`. |
 | `stateDir` | `$DSH_HOME/graceful-restart` | Requests, event log and pending notifications. |
@@ -96,12 +97,39 @@ the browser cannot read itself (`process.uptime()`, pid, pending requests, busy
 agents). The route exposes no causes and no session ids; it is mounted only when
 the host has a `webServer` service.
 
+## The note about killed jobs
+
+A restart that kills a background job leaves the session that started it with a
+result that will never arrive: the next turn would read the loss as a silent
+disappearance. With `notifyJobOwners` on (the default), the plugin snapshots the
+running jobs just before it ends the process — `JobView.owner` is the owning
+session — and stores them in `pending.json` next to the restart requests:
+
+```json
+{
+  "version": 2,
+  "restartedAt": "2025-11-11T18:20:00.000Z",
+  "causes": "dsh-im updated to 5.10.0",
+  "records": [{ "id": "…", "cause": "…", "needNotify": true, "sessionId": "sess-1" }],
+  "jobLoss": [
+    { "sessionId": "sess-1", "jobs": [{ "id": "bash-1a2b", "kind": "bash", "label": "build", "status": "running", "startedAt": 1762870000000, "elapsedMs": 65000 }] }
+  ]
+}
+```
+
+On the next start every session gets **exactly one** note, however many jobs it
+lost: the restart cause (if that session asked for one) and then the whole list
+of its interrupted jobs with how long each had been running. Three jobs of one
+session are one message, not three. A session that only lost a job and asked for
+no note still gets the job part. A note that cannot be placed yet is carried into
+the next restart like any other.
+
 ## Files it leaves behind
 
 | File | Contents |
 | --- | --- |
 | `<stateDir>/events.log` | Every request, cancel, window event, cause and exit decision, one line each. Survives journald rotation. |
-| `<stateDir>/pending.json` | Requests of the restart that just happened, kept until the sessions are woken. |
+| `<stateDir>/pending.json` | Requests and killed-job lists of the restart that just happened, kept until the sessions are woken. |
 
 ## Install
 
@@ -147,7 +175,13 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
 - A `pending.json` newer than the running process is dropped at start: it can
   only come from an exit that never happened, and announcing that restart would
   be a lie.
-- Background jobs are opt-in: with `waitForJobs` off a restart kills them silently. `ctx.jobs.list()` without a caller returns only *unowned* jobs (the registry filters by `job.owner === caller`), so the plugin collects session-owned ones per live agent.
+- Background jobs are opt-in: with `waitForJobs` off a restart kills them. Since
+  1.5.0 that is not silent — with `notifyJobOwners` on, the owning session gets a
+  note. `ctx.jobs.list()` without a caller returns only *unowned* jobs (the
+  registry filters by `job.owner === caller`), so the plugin collects
+  session-owned ones per live agent and reads `JobView.owner` to group them. An
+  *unowned* job has no session to tell, and a job of a session that is no longer
+  live cannot be found at all: `list(sessionId)` needs the live id.
 - The plugin does not watch HTTP requests, only agents. A user typing a follow-up
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.

@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { STATUS_PATH, apply } from '../index.mjs'
 
 /** A host that grants exactly the services the plugin asks for, and nothing else. */
-function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }), delayServices = {} } = {}) {
+function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }), delayServices = {}, jobs = [] } = {}) {
   const registered = []
   const routes = []
   const followed = []
@@ -24,8 +24,11 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
   const services = () => ({
     webServer: { register: route => { routes.push(route); return () => {} } },
     settings: { describe: () => settingsValue === null ? [] : [{ ns: 'dsh-graceful-restart', value: settingsValue }] },
-    // The cron-style delivery path: a one-shot schedule task bound to the session.
-    jobs: { list: () => [] },
+    // The registry contract: `list()` answers only unowned jobs, `list(caller)`
+    // answers that owner's jobs plus the unowned ones.
+    jobs: {
+      list: caller => jobs.filter(job => job.owner === undefined || job.owner === caller),
+    },
     schedule: {
       create: async (sessionId, request) => {
         // The real service validates its request; the fake mirrors that, because
@@ -68,9 +71,9 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
 }
 
 /** Write a pending file dated in the past, so it counts as a previous run's. */
-function writePending (dir, records, ageSeconds = 120) {
+function writePending (dir, records, ageSeconds = 120, extra = {}) {
   const path = join(dir, 'pending.json')
-  writeFileSync(path, `${JSON.stringify({ version: 1, restartedAt: new Date().toISOString(), records }, null, 2)}\n`)
+  writeFileSync(path, `${JSON.stringify({ version: 2, restartedAt: new Date().toISOString(), records, ...extra }, null, 2)}\n`)
   const stamp = Date.now() / 1000 - ageSeconds
   utimesSync(path, stamp, stamp)
   return path
@@ -163,5 +166,105 @@ test('an undeliverable note is kept for the next question instead of being lost'
   // it: the record is dropped with a warning.
   assert.equal(existsSync(join(dir, 'pending.json')), false)
   assert.equal(host.followed.length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+/** One running job view, as the registry hands it out. */
+function job (id, owner, label, ageMs = 60000, status = 'running') {
+  return { id, kind: 'bash', label, status, ...(owner ? { owner } : {}), startedAt: Date.now() - ageMs }
+}
+
+test('a restart that kills jobs writes them to the pending file, grouped by owner', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-kill-'))
+  const host = fakeHost({
+    // A job is reachable only through the live agent that owns it: `list()`
+    // without a caller answers unowned jobs alone, so both owners stay listed.
+    agents: [
+      { id: 'a1', session: { id: 'sess-1' }, status: 'idle' },
+      { id: 'a2', session: { id: 'sess-2' }, status: 'idle' },
+    ],
+    jobs: [
+      job('bash-1', 'sess-1', 'build'),
+      job('bash-2', 'sess-1', 'tests', 30000, 'stopping'),
+      job('bash-3', 'sess-2', 'git fetch', 5000),
+      // No owner: there is nobody to tell, so it must not end up in a note.
+      job('bash-4', '', 'detached', 1000),
+    ],
+  })
+  apply(host.ctx, {
+    stateDir: dir,
+    notifyDelayMs: 60000,
+    quietSeconds: 0,
+    exitMethod: 'command',
+    exitCommand: 'true',
+    language: 'ru',
+  })
+  const restart = host.registered.find(tool => tool.name === 'dsh_restart')
+  const answer = await restart.execute({ cause: 'обновили плагин', need_notify: false })
+  assert.equal(answer.status, 'ok')
+  // Two heartbeats: the first opens the zero-length quiet window, the second fires.
+  await wait(2600)
+  const state = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.equal(state.version, 2)
+  assert.equal(state.jobLoss.length, 2, 'one entry per owning session, none for the unowned job')
+  const bySession = new Map(state.jobLoss.map(group => [group.sessionId, group.jobs.map(entry => entry.id)]))
+  assert.deepEqual(bySession.get('sess-1'), ['bash-1', 'bash-2'])
+  assert.deepEqual(bySession.get('sess-2'), ['bash-3'])
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('one note per session carries the cause and every job that session lost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-onenote-'))
+  const host = fakeHost()
+  writePending(
+    dir,
+    [{ id: '50', cause: 'обновили плагин', needNotify: true, sessionId: 'sess-1' }],
+    120,
+    { jobLoss: [
+      { sessionId: 'sess-1', jobs: [
+        { id: 'bash-1', kind: 'bash', label: 'build', elapsedMs: 65000 },
+        { id: 'bash-2', kind: 'bash', label: 'tests', elapsedMs: 20000 },
+      ] },
+      { sessionId: 'sess-2', jobs: [{ id: 'bash-3', kind: 'bash', label: 'sync', elapsedMs: 4000 }] },
+    ] },
+  )
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, language: 'ru' })
+  await wait(120)
+  assert.equal(host.followed.length, 2, 'two sessions, two notes — not four')
+  const first = host.followed.find(note => note.id === 'sess-1')
+  assert.match(first.text, /обновили плагин/, 'the restart cause stays in the same note')
+  assert.match(first.text, /bash-1/)
+  assert.match(first.text, /bash-2/)
+  assert.match(first.text, /1 мин 5 с/, 'a job that ran a minute is reported as such')
+  assert.match(first.text, /оборвано фоновых задач: 2/)
+  const second = host.followed.find(note => note.id === 'sess-2')
+  assert.match(second.text, /bash-3/)
+  assert.doesNotMatch(second.text, /bash-1/, 'a note never mentions another session\'s jobs')
+  assert.equal(existsSync(join(dir, 'pending.json')), false, 'delivered notes leave no pending file')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a killed job is reported even when its session asked for no restart note', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-jobonly-'))
+  const host = fakeHost()
+  writePending(dir, [], 120, { jobLoss: [{ sessionId: 'sess-7', jobs: [{ id: 'bash-9', kind: 'bash', label: 'deploy', elapsedMs: 3000 }] }] })
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, language: 'ru' })
+  await wait(120)
+  assert.equal(host.followed.length, 1)
+  assert.equal(host.followed[0].id, 'sess-7')
+  assert.match(host.followed[0].text, /bash-9/)
+  assert.doesNotMatch(host.followed[0].text, /перезапущен по запросу/, 'no restart request from that session, so no cause part')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('an undeliverable job note is kept, jobs and all, for the next start', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-jobretry-'))
+  const host = fakeHost({ resolve: () => ({ error: new Error('schedule: no such session') }) })
+  writePending(dir, [], 120, { jobLoss: [{ sessionId: 'sess-8', jobs: [{ id: 'bash-5', kind: 'bash', label: 'x', elapsedMs: 1000 }] }] })
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5 })
+  await wait(300)
+  const kept = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.deepEqual(kept.jobLoss.map(group => group.sessionId), ['sess-8'])
+  assert.equal(kept.records.length, 0)
   rmSync(dir, { recursive: true, force: true })
 })

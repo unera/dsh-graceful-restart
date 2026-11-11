@@ -10,10 +10,13 @@ import {
   Config,
   RestartQueue,
   causesOf,
+  composeNotes,
   createTools,
   dictionary,
+  elapsedText,
   exitPlan,
   format,
+  mergeJobLoss,
   normalizeConfig,
   resolveStateDir,
 } from '../index.mjs'
@@ -185,6 +188,7 @@ test('config normalization never throws and keeps values inside bounds', () => {
     quietSeconds: 10,
     reasonFile: '',
     waitForJobs: false,
+    notifyJobOwners: true,
     language: 'en',
     stateDir: '',
   })
@@ -195,6 +199,9 @@ test('config normalization never throws and keeps values inside bounds', () => {
   assert.equal(normalizeConfig({ language: 'RU' }).language, 'RU')
   assert.equal(normalizeConfig({}).waitForJobs, false)
   assert.equal(normalizeConfig({ waitForJobs: true }).waitForJobs, true)
+  assert.equal(normalizeConfig({}).notifyJobOwners, true, 'the owner note is on unless explicitly refused')
+  assert.equal(normalizeConfig({ notifyJobOwners: false }).notifyJobOwners, false)
+  assert.equal(normalizeConfig({ notifyJobOwners: 'no' }).notifyJobOwners, true)
 })
 
 test('every field the Config schema declares is handled by normalizeConfig', () => {
@@ -320,4 +327,71 @@ test('dsh_restart_cancel reports an unknown id as an error, not as a cancel', as
   assert.equal(value.status, 'error')
   assert.equal(value.cancelled, false)
   assert.equal(value.pending, 2)
+})
+
+test('the job-owner switch is on by default and can be turned off', () => {
+  assert.equal(normalizeConfig({}).notifyJobOwners, true)
+  assert.equal(normalizeConfig({ notifyJobOwners: false }).notifyJobOwners, false)
+  assert.equal(normalizeConfig({ notifyJobOwners: 'no' }).notifyJobOwners, true, 'only an explicit false disables it')
+})
+
+test('a duration reads in seconds, minutes or hours', () => {
+  const en = dictionary('en')
+  assert.equal(elapsedText(4200, en), '4s')
+  assert.equal(elapsedText(65000, en), '1m 5s')
+  assert.equal(elapsedText(3 * 3600 * 1000 + 120000, en), '3h 2m')
+  assert.equal(elapsedText(-5000, en), '0s', 'a clock that went backwards is not a negative duration')
+  assert.equal(elapsedText(65000, dictionary('ru')), '1 мин 5 с')
+})
+
+test('job losses fold into one entry per session, jobs deduplicated by id', () => {
+  const merged = mergeJobLoss(
+    [{ sessionId: 's1', jobs: [{ id: 'bash-1', elapsedMs: 10 }, { id: 'bash-2', elapsedMs: 20 }] }],
+    [
+      { sessionId: 's1', jobs: [{ id: 'bash-2', elapsedMs: 20 }, { id: 'bash-3', elapsedMs: 30 }] },
+      { sessionId: 's2', jobs: [{ id: 'bash-4', elapsedMs: 40 }] },
+      { sessionId: 's3', jobs: [] },
+      { jobs: [{ id: 'bash-5' }] },
+    ],
+  )
+  assert.deepEqual(merged.map(group => group.sessionId), ['s1', 's2'])
+  assert.deepEqual(merged[0].jobs.map(job => job.id), ['bash-1', 'bash-2', 'bash-3'])
+})
+
+test('notes: one per session, the cause and its own jobs, never another session\'s', () => {
+  const d = dictionary('ru')
+  const notes = composeNotes({
+    records: [
+      { id: '1', cause: 'обновили плагин', needNotify: true, sessionId: 's1' },
+      { id: '2', cause: 'тихая установка', needNotify: false, sessionId: 's2' },
+      { id: '3', cause: 'второй повод', needNotify: true, sessionId: 's1' },
+    ],
+    jobLoss: [
+      { sessionId: 's1', jobs: [{ id: 'bash-1', kind: 'bash', label: 'build', elapsedMs: 65000 }, { id: 'bash-2', kind: 'bash', label: '', elapsedMs: 3000 }] },
+      { sessionId: 's2', jobs: [{ id: 'bash-3', kind: 'bash', label: 'sync', elapsedMs: 500 }] },
+      { sessionId: 's4', jobs: [{ id: 'bash-9', kind: 'bash', label: 'ночная', elapsedMs: 1000 }] },
+    ],
+  }, d)
+  assert.equal(notes.length, 3, 'two sessions that asked, plus the one that only lost a job')
+  const s1 = notes.find(note => note.sessionId === 's1')
+  assert.match(s1.prompt, /обновили плагин; второй повод/)
+  assert.match(s1.prompt, /bash-1/)
+  assert.match(s1.prompt, /bash-2/)
+  assert.doesNotMatch(s1.prompt, /bash-3/)
+  assert.match(s1.prompt, /«build»/)
+  assert.doesNotMatch(s1.prompt, /«»/, 'a job without a label is not quoted into «»')
+  const s2 = notes.find(note => note.sessionId === 's2')
+  assert.doesNotMatch(s2.prompt, /перезапущен по запросу/, 'need_notify was off: only the job part')
+  assert.match(s2.prompt, /bash-3/)
+  assert.equal(s2.title, d.jobLossTitle)
+  const s4 = notes.find(note => note.sessionId === 's4')
+  assert.equal(s4.title, d.jobLossTitle)
+  assert.match(s4.prompt, /ночная/)
+})
+
+test('a note keeps its cause when no cause was given at all', () => {
+  const d = dictionary('ru')
+  const notes = composeNotes({ records: [{ id: '1', cause: '   ', needNotify: true, sessionId: 's1' }] }, d)
+  assert.equal(notes.length, 1)
+  assert.match(notes[0].prompt, new RegExp(d.noCause))
 })
