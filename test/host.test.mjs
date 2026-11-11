@@ -109,22 +109,39 @@ test('cancelling the last request cancels the restart, one of two does not', () 
   assert.deepEqual(clean.cancel(only.id), { found: false, remaining: 0 })
 })
 
-test('a running background job always holds the restart', () => {
-  // A restart kills a job mid-flight, so a job counts as work exactly like a
-  // running agent — there is no setting to interrupt one.
-  const queue = new RestartQueue({
+test('a running background job holds the restart only when the option asks for it', () => {
+  const running = [{ id: 'bash-1', label: 'npm run dev', status: 'running' }]
+  const agents = [{ id: 'a', status: 'idle' }]
+
+  const ignored = new RestartQueue({
     quietMs: 0,
     pollMs: 1000,
     now: () => 5000,
-    listAgents: () => [{ id: 'a', status: 'idle' }],
-    listJobs: () => [{ id: 'bash-1', label: 'npm run dev', status: 'running' }],
+    listAgents: () => agents,
+    listJobs: () => running,
+    waitForJobs: () => false,
     onReady: () => {},
     setTimer: () => ({ fake: true }),
     clearTimer: () => {},
   })
-  queue.request({ cause: 'update' })
-  queue.tick()
-  const tick = queue.tick()
+  ignored.request({ cause: 'update' })
+  ignored.tick() // the first heartbeat only opens the window
+  assert.equal(ignored.tick().fire, true, 'by default a job does not postpone anything')
+
+  const counted = new RestartQueue({
+    quietMs: 0,
+    pollMs: 1000,
+    now: () => 5000,
+    listAgents: () => agents,
+    listJobs: () => running,
+    waitForJobs: () => true,
+    onReady: () => {},
+    setTimer: () => ({ fake: true }),
+    clearTimer: () => {},
+  })
+  counted.request({ cause: 'update' })
+  counted.tick()
+  const tick = counted.tick()
   assert.equal(tick.fire, false, 'the job holds the window')
   assert.deepEqual(tick.busy, ['bash-1'])
 })
@@ -137,13 +154,14 @@ test('a settled job releases the window', () => {
     now: () => 5000,
     listAgents: () => [],
     listJobs: () => jobs,
+    waitForJobs: () => true,
     onReady: () => {},
     setTimer: () => ({ fake: true }),
     clearTimer: () => {},
   })
   queue.request({ cause: 'update' })
   queue.tick()
-  assert.equal(queue.tick().fire, false)
+  assert.equal(queue.tick().fire, false, 'a running job holds the window')
   jobs = [{ id: 'bash-1', label: 'build', status: 'completed' }]
   queue.tick() // the window reopens now that the job is gone
   assert.equal(queue.tick().fire, true, 'a completed job is not work any more')
@@ -166,6 +184,7 @@ test('config normalization never throws and keeps values inside bounds', () => {
     exitCommand: '',
     quietSeconds: 10,
     reasonFile: '',
+    waitForJobs: false,
     language: 'en',
     stateDir: '',
   })
@@ -174,7 +193,8 @@ test('config normalization never throws and keeps values inside bounds', () => {
   assert.equal(normalizeConfig({ quietSeconds: -5 }).quietSeconds, 10)
   assert.equal(normalizeConfig({ exitCommand: '  reboot  ' }).exitCommand, 'reboot')
   assert.equal(normalizeConfig({ language: 'RU' }).language, 'RU')
-
+  assert.equal(normalizeConfig({}).waitForJobs, false)
+  assert.equal(normalizeConfig({ waitForJobs: true }).waitForJobs, true)
 })
 
 test('every field the Config schema declares is handled by normalizeConfig', () => {

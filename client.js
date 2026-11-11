@@ -28,6 +28,8 @@ window.__ModuleLoader__.load({
 				"quietSeconds.hint": "How long the host must stay idle after the last activity before it restarts, re-checked every second.",
 				"reasonFile": "Reason file",
 				"reasonFile.hint": "Optional file that receives the causes before the restart, one line.",
+				"waitForJobs": "Wait for background jobs",
+				"waitForJobs.hint": "Hold the restart while a background job is running. Off by default: a dev server that never ends would postpone the restart forever.",
 				"language": "Language",
 				"language.hint": "Language of tool descriptions, tool answers and the post-restart note.",
 				"readonly": "Configuration is read-only here.",
@@ -52,6 +54,8 @@ window.__ModuleLoader__.load({
 				"quietSeconds.hint": "Сколько хост должен простоять без активности перед перезапуском; проверяется каждую секунду.",
 				"reasonFile": "Файл причины",
 				"reasonFile.hint": "Необязательный файл, куда перед перезапуском пишутся причины одной строкой.",
+				"waitForJobs": "Ждать завершение job",
+				"waitForJobs.hint": "Держать перезапуск, пока работает фоновая задача. По умолчанию выключено: вечный процесс вроде dev-сервера иначе отложит перезапуск навсегда.",
 				"language": "Язык",
 				"language.hint": "Язык описаний инструментов, ответов инструментов и записки после перезапуска.",
 				"readonly": "Настройки доступны только для чтения.",
@@ -76,6 +80,8 @@ window.__ModuleLoader__.load({
 				"quietSeconds.hint": "重启前宿主必须保持空闲的时长，每秒复查一次。",
 				"reasonFile": "原因文件",
 				"reasonFile.hint": "可选：重启前把原因写成一行写入该文件。",
+				"waitForJobs": "等待后台任务结束",
+				"waitForJobs.hint": "有后台任务运行时暂缓重启。默认关闭：常驻进程（如开发服务器）否则会无限推迟重启。",
 				"language": "语言",
 				"language.hint": "工具描述、工具回复以及重启后消息的语言。",
 				"readonly": "此处配置为只读。",
@@ -262,6 +268,14 @@ window.__ModuleLoader__.load({
 					}, choices.map(function(option) {
 						return h("option", { key: option.value, value: option.value }, option.label);
 					}));
+				} else if (field.kind === "bool") {
+					input = h("input", {
+						type: "checkbox",
+						checked: props.value === true,
+						disabled: disabled,
+						style: { width: "18px", height: "18px", cursor: disabled ? "default" : "pointer" },
+						onChange: function(event) { commit(props.scope, field.key, event.target.checked === true); },
+					});
 				} else if (field.kind === "number") {
 					input = h("input", {
 						type: "number",
@@ -328,6 +342,7 @@ window.__ModuleLoader__.load({
 			{ key: "serviceUnit", kind: "text", placeholder: "dsh-server", visible: function(value) { return (value.exitMethod || "systemctl") === "systemctl"; } },
 			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server", visible: function(value) { return value.exitMethod === "command"; } },
 			{ key: "quietSeconds", kind: "number" },
+			{ key: "waitForJobs", kind: "bool" },
 			{ key: "reasonFile", kind: "text", placeholder: "/home/user/.cache/dsh-restart-reason.txt" },
 			{ key: "language", kind: "select", options: ["en", "ru", "zh"] },
 		];
