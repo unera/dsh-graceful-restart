@@ -116,6 +116,14 @@ the settings card is keyed by the bundle's package name.
 - `kill` and `exit` end the process; under `Restart=on-failure` a clean exit or
   SIGTERM is not a failure, so the host stays down unless something else starts
   it. Use `systemctl` unless you know your supervisor restarts on clean exits.
+- An unusable exit method is caught at request time: `command` with an empty
+  command refuses the request with `status: "error"` and names the field to fix,
+  instead of scheduling a restart that would only die in the log. If the settings
+  become unusable between the request and the quiet window, the restart is
+  refused at that last step, the requests stay pending and the watcher pauses.
+- A `pending.json` newer than the running process is dropped at start: it can
+  only come from an exit that never happened, and announcing that restart would
+  be a lie.
 - The plugin does not watch HTTP requests, only agents. A user typing a follow-up
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.

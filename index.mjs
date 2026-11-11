@@ -25,7 +25,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -113,6 +113,7 @@ const DICT = {
     cancelled: 'Request {id} is cancelled. Pending requests: {pending}.',
     cancelledAll: 'Request {id} is cancelled. No requests are left, so the restart is cancelled too.',
     cancelMissing: 'No pending restart request has id {id}. Nothing was cancelled. Call dsh_restart to register a new one.',
+    badExit: 'Nothing was registered: exit method "command" cannot end the host while the exit command is empty, so the request would only die in the log. Set the command on the plugin page (Plugins → dsh-graceful-restart), or switch the exit method to systemctl.',
     notify: '🔁 The DSH host restarted on request ({causes}). The process is up again — continue the work you were doing.',
     notifyCauseSeparator: '; ',
     noCause: 'no cause given',
@@ -143,6 +144,7 @@ const DICT = {
     cancelled: 'Заявка {id} снята. Осталось заявок: {pending}.',
     cancelledAll: 'Заявка {id} снята. Других заявок нет, поэтому перезапуск отменён.',
     cancelMissing: 'Заявки с id {id} нет. Ничего не отменено. Вызови dsh_restart, чтобы зарегистрировать новую.',
+    badExit: 'Заявка не создана: способ выхода "command" не может завершить хост, пока команда пуста — заявка умерла бы только в логе. Заполни команду на странице плагина (Плагины → dsh-graceful-restart) или переключи способ на systemctl.',
     notify: '🔁 DSH перезапущен по запросу ({causes}). Процесс снова работает — можно продолжать работу.',
     notifyCauseSeparator: '; ',
     noCause: 'причина не указана',
@@ -173,6 +175,7 @@ const DICT = {
     cancelled: '请求 {id} 已撤销。剩余请求：{pending}。',
     cancelledAll: '请求 {id} 已撤销。没有其他请求，因此重启也一并取消。',
     cancelMissing: '没有 id 为 {id} 的待处理请求，未做任何撤销。请调用 dsh_restart 重新登记。',
+    badExit: '未登记：退出方式为 "command" 但命令为空，宿主无法结束，请求只会死在日志里。请在插件页面（插件 → dsh-graceful-restart）填写命令，或把退出方式改为 systemctl。',
     notify: '🔁 DSH 已按请求重启（原因：{causes}）。进程已恢复，可以继续工作。',
     notifyCauseSeparator: '；',
     noCause: '未说明原因',
@@ -380,7 +383,17 @@ export class RestartQueue {
     this.fired = true
     this.stop()
     this.log('info', `quiet window passed, restarting (${this.requests.size} request(s))`)
-    this.onReady(this.pending())
+    const settled = this.onReady(this.pending())
+    if (settled === false) {
+      // The restart could not happen (an unusable exit method, for instance).
+      // Keeping the requests and dropping the window means a later request — or
+      // a fix in the settings — still gets a restart, instead of a queue that
+      // quietly believes it has already fired.
+      this.fired = false
+      this.quietSince = null
+      this.log('warn', 'restart refused at the last step; requests stay pending, watcher paused')
+      return { busy, quietMs, fire: false }
+    }
     return { busy, quietMs, fire: true }
   }
 }
@@ -537,11 +550,16 @@ export function createTools ({ dict, register, cancel, pending }) {
     output: { schema: RESTART_OUTPUT, render: (args, value) => renderJson(value) },
     async execute (args, exec) {
       const d = dict()
-      const record = register({
-        cause: args.cause,
-        needNotify: args.need_notify === true,
-        sessionId: exec?.agent?.session?.id ?? null,
-      })
+      let record
+      try {
+        record = register({
+          cause: args.cause,
+          needNotify: args.need_notify === true,
+          sessionId: exec?.agent?.session?.id ?? null,
+        })
+      } catch (error) {
+        return { status: 'error', message: String(error?.message ?? error), id: '', pending: pending() }
+      }
       return { status: 'ok', message: d.scheduled, id: record.id, pending: pending() }
     },
   }
@@ -645,6 +663,12 @@ export function apply (ctx, config = {}) {
 
   const dict = () => dictionary(options().language)
 
+  /** Why the configured exit method cannot end the host right now, or null. */
+  function exitProblem (current) {
+    if (current.exitMethod === 'command' && !current.exitCommand) return 'command'
+    return null
+  }
+
   const queue = new RestartQueue({
     quietMs: () => options().quietSeconds * 1000,
     listAgents: () => ctx.agents.list(),
@@ -661,6 +685,15 @@ export function apply (ctx, config = {}) {
     const current = options()
     const d = dict()
     const causes = causesOf(records, d)
+    let plan
+    try {
+      plan = exitPlan(current)
+    } catch (error) {
+      // Refuse before anything durable is written: a pending file from an exit
+      // that never happened would wake sessions on a restart that did not occur.
+      log('error', `exit plan refused: ${error?.message ?? error}`)
+      return false
+    }
     log('info', `restarting now; causes: ${causes}`)
     try {
       mkdirSync(stateDir(), { recursive: true })
@@ -680,27 +713,22 @@ export function apply (ctx, config = {}) {
         log('warn', `cannot write ${current.reasonFile}: ${error?.message ?? error}`)
       }
     }
-    let plan
-    try {
-      plan = exitPlan(current)
-    } catch (error) {
-      log('error', `exit plan refused: ${error?.message ?? error}`)
-      return
-    }
     log('info', `exit method: ${plan.kind} (${plan.detail})`)
     if (plan.self === 'SIGTERM') {
       process.kill(process.pid, 'SIGTERM')
-      return
+      return true
     }
     if (plan.self === 'exit') {
       process.exit(0)
-      return
+      return true
     }
     try {
       plan.run(spawnDetached)
     } catch (error) {
       log('error', `exit command failed: ${error?.message ?? error}`)
+      return false
     }
+    return true
   }
 
   /** Wake one session with the post-restart note. */
@@ -732,6 +760,14 @@ export function apply (ctx, config = {}) {
     let state
     try {
       if (!existsSync(pendingFile())) return
+      const startedAt = Date.now() - Math.floor(process.uptime() * 1000)
+      if (statSync(pendingFile()).mtimeMs > startedAt) {
+        // Written after this process started: the previous exit was refused, so
+        // the process never restarted and there is nothing to announce.
+        log('warn', 'pending.json is newer than this process: the earlier restart never happened, dropping it')
+        rmSync(pendingFile(), { force: true })
+        return
+      }
       state = JSON.parse(readFileSync(pendingFile(), 'utf8'))
     } catch (error) {
       log('warn', `cannot read ${pendingFile()}: ${error?.message ?? error}`)
@@ -764,7 +800,12 @@ export function apply (ctx, config = {}) {
   ctx.effect(() => {
     const disposers = createTools({
       dict,
-      register: request => queue.request(request),
+      register: request => {
+        const current = options()
+        const problem = exitProblem(current)
+        if (problem) throw new Error(format(dict().badExit, { method: problem }))
+        return queue.request(request)
+      },
       cancel: id => queue.cancel(id),
       pending: () => queue.pending().length,
     }).map(tool => ctx.tools.register(tool))

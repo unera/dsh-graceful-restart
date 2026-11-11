@@ -212,6 +212,42 @@ test('dsh_restart records the cause, the notify flag and the calling session', a
   assert.deepEqual(registered[0], { cause: 'обновили dsh-im', needNotify: true, sessionId: 'sess-1' })
 })
 
+test('a refused registration becomes an error result, not a thrown call', async () => {
+  const [restart] = createTools({
+    dict: () => dictionary('ru'),
+    register: () => { throw new Error(dictionary('ru').badExit) },
+    cancel: () => ({ found: false, remaining: 0 }),
+    pending: () => 0,
+  })
+  const value = await restart.execute({ cause: 'x' }, {})
+  assert.equal(value.status, 'error')
+  assert.equal(value.id, '')
+  assert.match(value.message, /команда/)
+})
+
+test('a restart refused at the last step leaves the requests pending', () => {
+  let calls = 0
+  const queue = new RestartQueue({
+    quietMs: 0,
+    pollMs: 1000,
+    now: () => 5000,
+    listAgents: () => [],
+    onReady: () => { calls += 1; return false },
+    setTimer: () => ({ fake: true }),
+    clearTimer: () => {},
+  })
+  queue.request({ cause: 'update' })
+  const first = queue.tick()
+  assert.equal(first.fire, false, 'a refused restart is not reported as fired')
+  assert.equal(queue.pending().length, 1, 'the request survives a refused exit')
+  assert.equal(calls, 1)
+  // The paused queue does not keep hammering on its own: the next request
+  // re-arms it, which is what a fixed setting followed by a new call looks like.
+  queue.request({ cause: 'again' })
+  assert.equal(queue.tick().fire, false)
+  assert.equal(calls, 2)
+})
+
 test('dsh_restart_cancel reports an unknown id as an error, not as a cancel', async () => {
   const [, cancel] = createTools({
     dict: () => dictionary('zh'),
