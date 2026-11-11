@@ -27,6 +27,13 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
     // The cron-style delivery path: a one-shot schedule task bound to the session.
     schedule: {
       create: async (sessionId, request) => {
+        // The real service validates its request; the fake mirrors that, because
+        // a fake that accepts anything hides a refused contract.
+        if (!Number.isSafeInteger(request.after_seconds) || request.after_seconds <= 0) {
+          throw new Error('after_seconds must be a positive safe integer.')
+        }
+        if (typeof request.title !== 'string' || request.title.trim() === '') throw new Error('title is required')
+        if (typeof request.prompt !== 'string' || request.prompt.trim() === '') throw new Error('prompt is required')
         const outcome = resolve(sessionId)
         if (outcome?.error) throw outcome.error
         followed.push({ id: sessionId, title: request.title, text: request.prompt, after: request.after_seconds })
@@ -105,7 +112,7 @@ test('a previous restart wakes the session that asked for a note', async () => {
   assert.equal(host.followed.length, 1)
   assert.equal(host.followed[0].id, 'sess-1')
   assert.match(host.followed[0].text, /обновили библиотеку/)
-  assert.equal(host.followed[0].after, 0, 'the reminder is due at once')
+  assert.ok(Number.isSafeInteger(host.followed[0].after) && host.followed[0].after > 0, 'the service refuses a zero delay')
   assert.ok(host.followed[0].title.length > 0, 'a schedule task needs a title')
   assert.equal(existsSync(join(dir, 'pending.json')), false, 'a delivered note leaves no pending file')
 })

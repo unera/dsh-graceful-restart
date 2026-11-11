@@ -778,7 +778,9 @@ export function apply (ctx, config = {}) {
     const request = {
       title: d.notifyTitle,
       prompt: format(d.notify, { causes: record.cause ? String(record.cause) : d.noCause }),
-      after_seconds: 0,
+      // The service refuses zero: `after_seconds` must be a positive safe
+      // integer, and one second is as close to "now" as a reminder gets.
+      after_seconds: 1,
     }
     const deadline = Date.now() + NOTIFY_DEADLINE_MS
     let announced = false
