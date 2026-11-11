@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Graceful restart",
+    "description": "Restart the DSH host from inside a session without cutting the answer: the request waits for every agent (subagents included) to finish, logs the causes, ends the process after a quiet window, and wakes the sessions that asked for a note once the host is back."
+  }
+}

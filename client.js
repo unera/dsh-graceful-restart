@@ -1,0 +1,233 @@
+window.__ModuleLoader__.load({
+	id: "dsh-graceful-restart",
+	factory: (require) => {
+		var module = { exports: {} };
+		var exports = module.exports;
+		var React = require("react");
+		var h = React.createElement;
+
+		var NS = "dsh-graceful-restart";
+		var ENTRY = "dsh-graceful-restart";
+
+		var DICTIONARIES = {
+			en: {
+				"title": "Graceful restart",
+				"intro": "How dsh_restart ends the host, and how long it waits for silence first. Changes apply to the next request.",
+				"exitMethod": "Exit method",
+				"exitMethod.hint": "systemctl is the only method that comes back by itself under a systemd user unit. kill and exit end the process without a restart unless a supervisor decides otherwise.",
+				"serviceUnit": "Service unit",
+				"serviceUnit.hint": "systemd user unit restarted by the systemctl method.",
+				"exitCommand": "Exit command",
+				"exitCommand.hint": "Shell command for the command method, started detached from the dying process.",
+				"quietSeconds": "Quiet window, seconds",
+				"quietSeconds.hint": "How long the host must stay idle after the last activity before it restarts, re-checked every second.",
+				"reasonFile": "Reason file",
+				"reasonFile.hint": "Optional file that receives the causes before the restart, one line.",
+				"language": "Language",
+				"language.hint": "Language of tool descriptions, tool answers and the post-restart note.",
+				"readonly": "Configuration is read-only here.",
+			},
+			ru: {
+				"title": "Аккуратный перезапуск",
+				"intro": "Как dsh_restart завершает хост и сколько он ждёт тишины. Изменения действуют со следующей заявки.",
+				"exitMethod": "Способ выхода",
+				"exitMethod.hint": "systemctl — единственный способ, после которого хост поднимается сам (systemd user unit). kill и exit просто завершают процесс, если только им не управляет супервизор.",
+				"serviceUnit": "Юнит сервиса",
+				"serviceUnit.hint": "systemd user unit, который перезапускает способ systemctl.",
+				"exitCommand": "Команда выхода",
+				"exitCommand.hint": "Shell-команда для способа command, запускается отдельно от умирающего процесса.",
+				"quietSeconds": "Окно тишины, секунд",
+				"quietSeconds.hint": "Сколько хост должен простоять без активности перед перезапуском; проверяется каждую секунду.",
+				"reasonFile": "Файл причины",
+				"reasonFile.hint": "Необязательный файл, куда перед перезапуском пишутся причины одной строкой.",
+				"language": "Язык",
+				"language.hint": "Язык описаний инструментов, ответов инструментов и записки после перезапуска.",
+				"readonly": "Настройки доступны только для чтения.",
+			},
+			zh: {
+				"title": "优雅重启",
+				"intro": "dsh_restart 如何结束宿主，以及它先等待多久的静默。改动从下一次请求开始生效。",
+				"exitMethod": "退出方式",
+				"exitMethod.hint": "systemctl 是唯一会自行恢复的方式（systemd user unit）。kill 与 exit 只结束进程，除非由外部守护进程拉起。",
+				"serviceUnit": "服务单元",
+				"serviceUnit.hint": "systemctl 方式重启的 systemd user 单元。",
+				"exitCommand": "退出命令",
+				"exitCommand.hint": "command 方式使用的 shell 命令，独立于即将结束的进程启动。",
+				"quietSeconds": "静默窗口（秒）",
+				"quietSeconds.hint": "重启前宿主必须保持空闲的时长，每秒复查一次。",
+				"reasonFile": "原因文件",
+				"reasonFile.hint": "可选：重启前把原因写成一行写入该文件。",
+				"language": "语言",
+				"language.hint": "工具描述、工具回复以及重启后消息的语言。",
+				"readonly": "此处配置为只读。",
+			},
+		};
+
+		function apply(ctx) {
+			var t = function(key) { return key; };
+			try {
+				t = ctx.locale.bind(NS);
+			} catch (error) {
+				console.warn("[dsh-graceful-restart] locale unavailable: " + (error && error.message));
+			}
+			try {
+				ctx.effect(function() {
+					ctx.locale.register(NS, "en", DICTIONARIES.en);
+					ctx.locale.register(NS, "ru", DICTIONARIES.ru);
+					ctx.locale.register(NS, "zh", DICTIONARIES.zh);
+					return function() {};
+				}, "dsh-graceful-restart: dictionaries");
+			} catch (error) {
+				console.warn("[dsh-graceful-restart] dictionaries failed: " + (error && error.message));
+			}
+			try {
+				ctx.effect(function() {
+					var disposers = [];
+					[["ru", "Русский"], ["zh", "中文"]].forEach(function(pair) {
+						try {
+							disposers.push(ctx.locale.addLanguage({ id: pair[0], label: pair[1], fallback: "en" }));
+						} catch (error) {
+							if (!/already/i.test(String((error && error.message) || error))) throw error;
+						}
+					});
+					return function() {
+						disposers.forEach(function(dispose) {
+							try { if (typeof dispose === "function") dispose(); } catch (e) {}
+						});
+					};
+				}, "dsh-graceful-restart: languages");
+			} catch (error) {
+				console.warn("[dsh-graceful-restart] languages failed: " + (error && error.message));
+			}
+
+			var scope = null;
+			try {
+				scope = ctx.configForms.get(ENTRY);
+			} catch (error) {
+				console.warn("[dsh-graceful-restart] config form unavailable: " + (error && error.message));
+			}
+			if (!scope) return;
+
+			try {
+				ctx.slots.inject("plugins.bundle.config", function() {
+					return ctx.slots.register({
+						name: "plugins.bundle.config",
+						key: ENTRY,
+						inject: function() { return { scope: scope }; },
+					}, Card);
+				});
+			} catch (error) {
+				console.warn("[dsh-graceful-restart] bundle config slot failed: " + (error && error.message));
+			}
+
+			function Card(props) {
+				var bound = props.scope || scope;
+				var snapshot = React.useSyncExternalStore(
+					function(listener) { return bound.subscribe(listener); },
+					function() { return bound.getSnapshot(); },
+				);
+				var value = (snapshot && snapshot.value) || {};
+				var writable = snapshot && snapshot.writable === true;
+				var rows = FIELDS.map(function(field) {
+					return h(Row, {
+						key: field.key,
+						field: field,
+						value: value[field.key],
+						writable: writable,
+						scope: bound,
+						t: t,
+					});
+				});
+				return h("div", { style: { display: "grid", gap: "4px" } },
+					h("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--dsw-alias-label-primary, inherit)", padding: "2px 0 4px" } }, t("title")),
+					h("div", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))", padding: "0 0 6px" } }, t("intro")),
+					rows,
+					writable ? null : h("div", { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))", paddingTop: "4px" } }, t("readonly")),
+				);
+			}
+
+			function Row(props) {
+				var field = props.field;
+				var t2 = props.t;
+				var disabled = props.writable !== true;
+				var label = h("div", { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
+					h("span", { style: { fontSize: "13px", color: "var(--dsw-alias-label-primary, inherit)" } }, t2(field.key)),
+					h("span", { style: { fontSize: "12px", lineHeight: 1.5, color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,.8))" } }, t2(field.key + ".hint")),
+				);
+				var input;
+				if (field.kind === "select") {
+					input = h("select", {
+						value: String(props.value == null ? field.options[0] : props.value),
+						disabled: disabled,
+						style: INPUT_STYLE,
+						onChange: function(event) { commit(props.scope, field.key, event.target.value); },
+					}, field.options.map(function(option) {
+						return h("option", { key: option, value: option }, option);
+					}));
+				} else if (field.kind === "number") {
+					input = h("input", {
+						type: "number",
+						min: 0,
+						max: 600,
+						step: 1,
+						value: props.value == null ? "" : String(props.value),
+						disabled: disabled,
+						style: INPUT_STYLE,
+						onChange: function(event) { commit(props.scope, field.key, Number(event.target.value)); },
+					});
+				} else {
+					input = h("input", {
+						type: "text",
+						value: props.value == null ? "" : String(props.value),
+						disabled: disabled,
+						placeholder: field.placeholder || "",
+						style: INPUT_STYLE,
+						onChange: function(event) { commit(props.scope, field.key, event.target.value); },
+					});
+				}
+				return h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "6px 0", borderTop: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2))" } },
+					label,
+					h("div", { style: { flex: "0 0 auto", minWidth: "180px" } }, input),
+				);
+			}
+
+			function commit(bound, field, value) {
+				try {
+					var pending = bound.set(field, value);
+					if (pending && typeof pending.catch === "function") {
+						pending.catch(function(error) {
+							console.warn("[dsh-graceful-restart] write failed: " + (error && error.message));
+						});
+					}
+				} catch (error) {
+					console.warn("[dsh-graceful-restart] write failed: " + (error && error.message));
+				}
+			}
+		}
+
+		var INPUT_STYLE = {
+			font: "inherit",
+			color: "inherit",
+			width: "100%",
+			boxSizing: "border-box",
+			background: "var(--dsw-alias-bg-module-platform, rgba(127,127,127,.08))",
+			border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
+			borderRadius: "8px",
+			padding: "4px 8px",
+		};
+
+		var FIELDS = [
+			{ key: "exitMethod", kind: "select", options: ["systemctl", "command", "kill", "exit"] },
+			{ key: "serviceUnit", kind: "text", placeholder: "dsh-server" },
+			{ key: "exitCommand", kind: "text", placeholder: "systemctl --user restart dsh-server" },
+			{ key: "quietSeconds", kind: "number" },
+			{ key: "reasonFile", kind: "text", placeholder: "/home/user/.cache/dsh-restart-reason.txt" },
+			{ key: "language", kind: "select", options: ["en", "ru", "zh"] },
+		];
+
+		exports.apply = apply;
+		exports.inject = ["slots", "locale", "configForms"];
+		exports.name = NS;
+		return module.exports;
+	}
+});

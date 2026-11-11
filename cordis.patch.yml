@@ -1,0 +1,9 @@
+# Bundle layer for dsh-graceful-restart.
+#
+# The row id must equal the package name: the client-modules scan matches the
+# Loader specifier against the nearest manifest name, and the config form on the
+# Plugins page is keyed by the bundle's package name. An alias here would keep
+# the tools working and silently drop the settings card.
+- insert:
+    - id: dsh-graceful-restart
+      name: 'dsh-graceful-restart'
