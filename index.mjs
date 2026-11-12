@@ -815,6 +815,9 @@ export function apply (ctx, config = {}) {
   let liveSettings = null
   let scheduling = null
   let jobRegistry = null
+  // Which shape of `schedule.create()` this host speaks, decided by the first
+  // note: the core changed it in 0.2.2 and the plugin may run on either.
+  let reminderShape = null
 
   const options = () => {
     const live = settingsSectionOf(liveSettings)
@@ -1009,17 +1012,31 @@ export function apply (ctx, config = {}) {
    * retries on its own terms, so this plugin no longer races session start-up:
    * it asks, and the service answers when it can.
    *
+   * The core changed that call in 0.2.2: `create(sessionId, { after_seconds })`
+   * became `create({ timing: { kind: 'after', after_seconds }, target })`, and a
+   * flat request is now refused with "timing must contain exactly kind and its
+   * matching selector". Both shapes are tried, the one that works is remembered,
+   * so a host on either core gets its note.
+   *
    * @param {{sessionId: string, title: string, prompt: string}} note - the note to place.
    * @returns true when the reminder exists (placed, or refused for good), false to keep it for later.
    */
   async function placeReminder (note) {
-    const request = {
-      title: note.title,
-      prompt: note.prompt,
-      // The service refuses zero: `after_seconds` must be a positive safe
-      // integer, and one second is as close to "now" as a reminder gets.
-      after_seconds: 1,
+    const sessionId = String(note.sessionId)
+    // The service refuses zero seconds: one is as close to "now" as a reminder
+    // gets, for either shape of the request.
+    const requests = {
+      typed: () => ({
+        title: note.title,
+        prompt: note.prompt,
+        timing: { kind: 'after', after_seconds: 1 },
+        target: { kind: 'session', sessionId },
+      }),
+      legacy: () => ({ title: note.title, prompt: note.prompt, after_seconds: 1 }),
     }
+    const place = async shape => (shape === 'typed'
+      ? scheduling.create(requests.typed())
+      : scheduling.create(sessionId, requests.legacy()))
     const deadline = Date.now() + NOTIFY_DEADLINE_MS
     let announced = false
     while (Date.now() < deadline) {
@@ -1031,21 +1048,28 @@ export function apply (ctx, config = {}) {
         await sleep(NOTIFY_POLL_MS)
         continue
       }
-      try {
-        await scheduling.create(String(note.sessionId), request)
-        log('info', `reminder placed for session ${note.sessionId}`)
-        return true
-      } catch (error) {
-        const message = String(error?.message ?? error)
-        if (/subagent/i.test(message)) {
-          // A delegated child has no delivery path at all; retrying forever would
-          // only hide that fact.
-          log('warn', `cannot wake ${note.sessionId}: ${message}`)
-          return true
+      const shapes = reminderShape === null ? ['typed', 'legacy'] : [reminderShape]
+      let placed = false
+      for (const shape of shapes) {
+        try {
+          await place(shape)
+          reminderShape = shape
+          log('info', `reminder placed for session ${sessionId} (${shape} schedule request)`)
+          placed = true
+          break
+        } catch (error) {
+          const message = String(error?.message ?? error)
+          if (/subagent/i.test(message)) {
+            // A delegated child has no delivery path at all; retrying forever would
+            // only hide that fact.
+            log('warn', `cannot wake ${sessionId}: ${message}`)
+            return true
+          }
+          log('info', `reminder for ${sessionId} not placed yet (${shape} request): ${message}`)
         }
-        log('info', `reminder for ${note.sessionId} not placed yet: ${message}`)
-        await sleep(NOTIFY_RETRY_MS)
       }
+      if (placed) return true
+      await sleep(NOTIFY_RETRY_MS)
     }
     log('warn', `gave up on the reminder for ${note.sessionId} after ${Math.round(NOTIFY_DEADLINE_MS / 1000)}s`)
     return false

@@ -186,12 +186,15 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
   after the quiet window opened does not cancel the restart; the next request
   from an agent does.
 - The post-restart note is a durable one-shot **schedule task**, the same
-  mechanism cron uses for its reminders: `ctx.schedule.create(sessionId, {title,
-  prompt, after_seconds: 0})`. The schedule service owns the timer, resumes the
-  session itself and retries on its own terms, so this plugin never races host
-  start-up. It is an ordinary turn, so it costs one model call — the price of a
-  notification the session can act on. Subagent sessions are refused by the
-  service and skipped with a warning: nothing can wake them.
+  mechanism cron uses for its reminders: `ctx.schedule.create({title, prompt,
+  timing: {kind: 'after', after_seconds: 1}, target: {kind: 'session',
+  sessionId}})`. That typed request is the core 0.2.2 shape; the older
+  `create(sessionId, {after_seconds})` is tried only when the typed one is
+  refused, so a host on either core gets its note. The schedule service owns the
+  timer, resumes the session itself and retries on its own terms, so this plugin
+  never races host start-up. It is an ordinary turn, so it costs one model call —
+  the price of a notification the session can act on. Subagent sessions are
+  refused by the service and skipped with a warning: nothing can wake them.
 - No IM plugin is involved: dsh-im has no part in the note. Whether the answer
   ever reaches a chat is the IM plugin's own delivery setting.
 - A note that could not be placed yet is carried over to the next restart

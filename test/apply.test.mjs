@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { STATUS_PATH, apply } from '../index.mjs'
 
 /** A host that grants exactly the services the plugin asks for, and nothing else. */
-function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }), delayServices = {}, jobs = [] } = {}) {
+function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: true }), delayServices = {}, jobs = [], scheduleApi = 'typed' } = {}) {
   const registered = []
   const routes = []
   const followed = []
@@ -29,18 +29,31 @@ function fakeHost ({ agents = [], settingsValue = null, resolve = () => ({ ok: t
     jobs: {
       list: caller => jobs.filter(job => job.owner === undefined || job.owner === caller),
     },
+    // The core moved the call in 0.2.2: `create(sessionId, { after_seconds })`
+    // became `create({ timing: { kind, ... }, target })`. The fake speaks the
+    // shape the test names and refuses the other one the way the real service
+    // does, because a fake that accepts anything hides exactly this breakage.
     schedule: {
-      create: async (sessionId, request) => {
-        // The real service validates its request; the fake mirrors that, because
-        // a fake that accepts anything hides a refused contract.
-        if (!Number.isSafeInteger(request.after_seconds) || request.after_seconds <= 0) {
+      create: async (first, second) => {
+        const typed = scheduleApi === 'typed'
+        if (typed !== (typeof first === 'object' && first !== null)) {
+          throw new Error('invalid_rule: timing must contain exactly kind and its matching selector.')
+        }
+        const request = typed ? first : second
+        const sessionId = typed ? request?.target?.sessionId : first
+        if (typeof request?.title !== 'string' || request.title.trim() === '') throw new Error('title is required')
+        if (typeof request.prompt !== 'string' || request.prompt.trim() === '') throw new Error('prompt is required')
+        const after = typed ? request.timing : request
+        if (typed && (after?.kind !== 'after' || !('after_seconds' in after))) {
+          throw new Error('invalid_rule: timing must contain exactly kind and its matching selector.')
+        }
+        // The service refuses zero: `after_seconds` must be a positive safe integer.
+        if (!Number.isSafeInteger(after.after_seconds) || after.after_seconds <= 0) {
           throw new Error('after_seconds must be a positive safe integer.')
         }
-        if (typeof request.title !== 'string' || request.title.trim() === '') throw new Error('title is required')
-        if (typeof request.prompt !== 'string' || request.prompt.trim() === '') throw new Error('prompt is required')
         const outcome = resolve(sessionId)
         if (outcome?.error) throw outcome.error
-        followed.push({ id: sessionId, title: request.title, text: request.prompt, after: request.after_seconds })
+        followed.push({ id: sessionId, title: request.title, text: request.prompt, after: after.after_seconds, request })
         return { id: 'sched-1', sessionId, record: request }
       },
     },
@@ -119,6 +132,33 @@ test('a previous restart wakes the session that asked for a note', async () => {
   assert.ok(Number.isSafeInteger(host.followed[0].after) && host.followed[0].after > 0, 'the service refuses a zero delay')
   assert.ok(host.followed[0].title.length > 0, 'a schedule task needs a title')
   assert.equal(existsSync(join(dir, 'pending.json')), false, 'a delivered note leaves no pending file')
+})
+
+test('a host on the older core still gets its note, through the old request shape', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-legacy-'))
+  const host = fakeHost({ scheduleApi: 'legacy' })
+  writePending(dir, [{ id: '47', cause: 'старое ядро', needNotify: true, sessionId: 'sess-2' }])
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5 })
+  await wait(60)
+  assert.equal(host.followed.length, 1, 'the refused typed request falls back to the flat one')
+  assert.equal(host.followed[0].id, 'sess-2')
+  assert.match(host.followed[0].text, /старое ядро/)
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('the schedule request carries the 0.2.2 timing and target, not a flat delay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-shape-'))
+  const host = fakeHost()
+  writePending(dir, [{ id: '48', cause: 'форма запроса', needNotify: true, sessionId: 'sess-3' }])
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5 })
+  await wait(60)
+  assert.equal(host.followed.length, 1)
+  const request = host.followed[0].request
+  assert.deepEqual(request.timing, { kind: 'after', after_seconds: 1 })
+  assert.deepEqual(request.target, { kind: 'session', sessionId: 'sess-3' })
+  assert.equal('after_seconds' in request, false, 'the flat delay is the pre-0.2.2 shape only')
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('a note whose service comes up late is still delivered, without another restart', async () => {
