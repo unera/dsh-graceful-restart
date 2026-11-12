@@ -203,9 +203,11 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
   reboot, a manual `systemctl restart`): no request was registered, so there is no
   pending file and nothing to report. Two shapes: the standard note with every
   cause, or `restartNoticeText` followed by a blank line and one line per cause.
-  A session that already gets its own note is skipped, so no session is told
-  twice, and a notice that could not be placed is kept in `pending.json` and
-  retried by the next start.
+  The notice is composed by the process that restarts and stored in
+  `pending.json`: at start-up the settings service may not be up yet, and a notice
+  decided from defaults would silently never be sent. A session that already gets
+  its own note is skipped, so nobody is told twice, and a notice that could not be
+  placed is kept in the same file and retried by the next start.
 - No IM plugin is involved: dsh-im has no part in the note. Whether the answer
   ever reaches a chat is the IM plugin's own delivery setting.
 - A note that could not be placed yet is carried over to the next restart

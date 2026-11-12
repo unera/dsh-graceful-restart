@@ -1044,6 +1044,12 @@ export function apply (ctx, config = {}) {
     } catch {}
     const merged = [...carried.filter(old => old?.id && !records.some(fresh => fresh.id === old.id)), ...records]
     const mergedJobLoss = mergeJobLoss(carriedJobLoss, jobLoss)
+    // The fixed-session notice is composed here, while the options are certainly
+    // known: at start-up the settings service may not have arrived yet, and a
+    // notice decided from defaults would silently never be sent. Anything a
+    // previous start could not place is still among `records`, so the fresh
+    // notice already carries its causes.
+    const notice = composeNotice({ records: merged }, noticeOptions(), dict())
     try {
       mkdirSync(stateDir(), { recursive: true })
       writeFileSync(pendingFile(), `${JSON.stringify({
@@ -1052,6 +1058,7 @@ export function apply (ctx, config = {}) {
         causes,
         records: merged,
         jobLoss: mergedJobLoss,
+        ...(notice ? { notice } : {}),
       }, null, 2)}\n`)
     } catch (error) {
       log('warn', `cannot persist the pending notifications: ${error?.message ?? error}`)
@@ -1209,30 +1216,25 @@ export function apply (ctx, config = {}) {
     const keep = records.filter(record => record?.needNotify === true && record?.sessionId && failed.has(String(record.sessionId)))
     const keepJobLoss = mergeJobLoss([], jobLoss).filter(group => failed.has(group.sessionId))
     // The fixed-session notice: one message about the restart itself, with every
-    // cause of every request. A notice that could not be placed is kept in the
-    // same file and retried by the next start, exactly like a kept note.
-    const keptNotice = state?.notice && typeof state.notice.prompt === 'string' && typeof state.notice.sessionId === 'string'
+    // cause of every request. It was composed by the process that restarted, so
+    // it is placed as it stands; one that cannot be placed is kept in this file
+    // and retried by the next start, exactly like a kept note.
+    const storedNotice = state?.notice && typeof state.notice.prompt === 'string' && typeof state.notice.sessionId === 'string'
       ? state.notice
       : null
-    const freshNotice = composeNotice({ records }, noticeOptions(), d)
-    const notices = []
-    if (keptNotice) notices.push(keptNotice)
-    if (freshNotice && !notices.some(note => note.prompt === freshNotice.prompt && note.sessionId === freshNotice.sessionId)) {
-      notices.push(freshNotice)
-    }
     let keptForLater = null
-    for (const note of notices) {
-      if (notes.some(other => other.sessionId === note.sessionId)) {
+    if (storedNotice) {
+      if (notes.some(other => other.sessionId === storedNotice.sessionId)) {
         // The session already gets its own note about this restart; a second,
         // nearly identical message would only be noise.
-        log('info', `restart notice for session ${note.sessionId} skipped: that session already gets its own note`)
-        if (keptForLater && keptForLater.sessionId === note.sessionId) keptForLater = null
-        continue
+        log('info', `restart notice for session ${storedNotice.sessionId} skipped: that session already gets its own note`)
+      } else {
+        log('info', `sending the restart notice to session ${storedNotice.sessionId}`)
+        if (!await placeReminder(storedNotice)) {
+          keptForLater = storedNotice
+          log('warn', `restart notice for session ${storedNotice.sessionId} stayed pending`)
+        }
       }
-      log('info', `sending the restart notice to session ${note.sessionId}`)
-      if (await placeReminder(note)) continue
-      keptForLater = note
-      log('warn', `restart notice for session ${note.sessionId} stayed pending`)
     }
     try {
       if (keep.length === 0 && keepJobLoss.length === 0 && !keptForLater) {

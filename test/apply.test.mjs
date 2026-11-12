@@ -161,59 +161,107 @@ test('the schedule request carries the 0.2.2 timing and target, not a flat delay
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('the configured session hears about the restart with every cause', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-'))
-  const host = fakeHost()
-  writePending(dir, [
-    // Nobody asked for a note here, and the cause still belongs in the notice:
-    // it reports the restart, not the request.
-    { id: '60', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' },
-    { id: '61', cause: 'поправили конфиг', needNotify: true, sessionId: 'sess-2' },
-  ])
+// The notice is composed by the process that restarts — the settings service is
+// not necessarily up yet when the next process reads the file — and placed by the
+// next process. Both halves are checked here.
+function fireRestart (host, dir, config) {
   apply(host.ctx, {
     stateDir: dir,
-    notifyDelayMs: 5,
+    notifyDelayMs: 60000,
+    quietSeconds: 0,
+    exitMethod: 'command',
+    exitCommand: 'true',
     language: 'ru',
-    restartNotice: true,
-    restartNoticeSessionId: 'sess-boss',
+    ...config,
   })
-  await wait(150)
-  const notice = host.followed.find(note => note.id === 'sess-boss')
-  assert.ok(notice, 'the configured session was woken')
-  assert.match(notice.text, /обновили плагин; поправили конфиг/)
-  assert.equal(host.followed.filter(note => note.id === 'sess-boss').length, 1, 'one notice, not one per request')
-  assert.ok(host.followed.some(note => note.id === 'sess-2'), 'the requesting session still gets its own note')
-  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  return host.registered.find(tool => tool.name === 'dsh_restart')
+}
+
+test('the restarting process writes the notice for the configured session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-'))
+  const host = fakeHost()
+  const restart = fireRestart(host, dir, { restartNotice: true, restartNoticeSessionId: 'sess-boss' })
+  await restart.execute({ cause: 'обновили плагин', need_notify: false })
+  const answer = await restart.execute({ cause: 'поправили конфиг', need_notify: true })
+  assert.equal(answer.status, 'ok')
+  // Two heartbeats: the first opens the zero-length quiet window, the second fires.
+  await wait(2600)
+  const state = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.ok(state.notice, 'the notice is stored with the requests')
+  assert.equal(state.notice.sessionId, 'sess-boss')
+  assert.match(state.notice.prompt, /обновили плагин; поправили конфиг/, 'every cause of every call, in one message')
+  assert.ok(state.notice.title.length > 0, 'a schedule task needs a title')
   rmSync(dir, { recursive: true, force: true })
 })
 
 test('a custom notice is the user text, a blank line, then the causes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gr-custom-'))
   const host = fakeHost()
-  writePending(dir, [{ id: '62', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' }])
-  apply(host.ctx, {
-    stateDir: dir,
-    notifyDelayMs: 5,
-    language: 'ru',
+  const restart = fireRestart(host, dir, {
     restartNotice: true,
     restartNoticeSessionId: 'sess-boss',
     restartNoticeMode: 'custom',
     restartNoticeText: 'Сервер поднялся.',
   })
-  await wait(150)
-  const notice = host.followed.find(note => note.id === 'sess-boss')
-  assert.ok(notice)
-  assert.equal(notice.text, 'Сервер поднялся.\n\nПричины:\n— обновили плагин')
+  await restart.execute({ cause: 'обновили плагин', need_notify: false })
+  await wait(2600)
+  const state = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.equal(state.notice.prompt, 'Сервер поднялся.\n\nПричины:\n— обновили плагин')
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('no notice while the switch is off', async () => {
+test('no notice is stored while the switch is off', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gr-nonotice-'))
   const host = fakeHost()
-  writePending(dir, [{ id: '63', cause: 'без уведомления', needNotify: false, sessionId: 'sess-1' }])
-  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, restartNoticeSessionId: 'sess-boss' })
-  await wait(150)
-  assert.equal(host.followed.length, 0)
+  const restart = fireRestart(host, dir, { restartNoticeSessionId: 'sess-boss' })
+  await restart.execute({ cause: 'без уведомления', need_notify: false })
+  await wait(2600)
+  const state = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.equal('notice' in state, false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('the next process places the stored notice on the configured session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-send-'))
+  const host = fakeHost()
+  writePending(dir, [{ id: '60', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' }], 120, {
+    notice: { sessionId: 'sess-boss', title: 'DSH перезапущен по запросу', prompt: 'Готово.\n\nПричины:\n— обновили плагин' },
+  })
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, language: 'ru' })
+  await wait(120)
+  const notice = host.followed.find(note => note.id === 'sess-boss')
+  assert.ok(notice, 'the configured session was woken')
+  assert.equal(notice.text, 'Готово.\n\nПричины:\n— обновили плагин')
+  assert.equal(host.followed.filter(note => note.id === 'sess-boss').length, 1, 'one notice, whatever the number of requests')
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a notice for a session that gets its own note is skipped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-dup-'))
+  const host = fakeHost()
+  writePending(dir, [{ id: '61', cause: 'причина', needNotify: true, sessionId: 'sess-1' }], 120, {
+    notice: { sessionId: 'sess-1', title: 'DSH перезапущен по запросу', prompt: 'общее уведомление' },
+  })
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, language: 'ru' })
+  await wait(120)
+  assert.equal(host.followed.length, 1, 'one message, not two')
+  assert.match(host.followed[0].text, /обновили|причина/)
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a notice that cannot be placed is kept for the next start', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-keep-'))
+  const host = fakeHost({ resolve: () => ({ error: new Error('schedule: no such session') }) })
+  writePending(dir, [], 120, {
+    notice: { sessionId: 'sess-gone', title: 'DSH перезапущен по запросу', prompt: 'не дошло' },
+  })
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, language: 'ru' })
+  await wait(300)
+  const kept = JSON.parse(readFileSync(join(dir, 'pending.json'), 'utf8'))
+  assert.equal(kept.notice.sessionId, 'sess-gone')
+  assert.equal(kept.notice.prompt, 'не дошло')
   rmSync(dir, { recursive: true, force: true })
 })
 
