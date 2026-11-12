@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The package claims Node 22+, so that floor and the current LTS are what
+    # matters: a failure on either one blocks a release.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    name: node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # The schema validator is a *peer* of the published package — a host
+      # already has it, so it must not become a dependency — but the tests
+      # import it through `index.mjs` and nothing would install it here.
+      - name: Install the peer the tests import
+        run: npm install --no-save --no-audit --no-fund @deepseek-ai/schemastery
+      - name: Test
+        run: npm test
+      - name: Check what would be published
+        run: npm pack --dry-run
