@@ -161,6 +161,62 @@ test('the schedule request carries the 0.2.2 timing and target, not a flat delay
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('the configured session hears about the restart with every cause', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-notice-'))
+  const host = fakeHost()
+  writePending(dir, [
+    // Nobody asked for a note here, and the cause still belongs in the notice:
+    // it reports the restart, not the request.
+    { id: '60', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' },
+    { id: '61', cause: 'поправили конфиг', needNotify: true, sessionId: 'sess-2' },
+  ])
+  apply(host.ctx, {
+    stateDir: dir,
+    notifyDelayMs: 5,
+    language: 'ru',
+    restartNotice: true,
+    restartNoticeSessionId: 'sess-boss',
+  })
+  await wait(150)
+  const notice = host.followed.find(note => note.id === 'sess-boss')
+  assert.ok(notice, 'the configured session was woken')
+  assert.match(notice.text, /обновили плагин; поправили конфиг/)
+  assert.equal(host.followed.filter(note => note.id === 'sess-boss').length, 1, 'one notice, not one per request')
+  assert.ok(host.followed.some(note => note.id === 'sess-2'), 'the requesting session still gets its own note')
+  assert.equal(existsSync(join(dir, 'pending.json')), false)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a custom notice is the user text, a blank line, then the causes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-custom-'))
+  const host = fakeHost()
+  writePending(dir, [{ id: '62', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' }])
+  apply(host.ctx, {
+    stateDir: dir,
+    notifyDelayMs: 5,
+    language: 'ru',
+    restartNotice: true,
+    restartNoticeSessionId: 'sess-boss',
+    restartNoticeMode: 'custom',
+    restartNoticeText: 'Сервер поднялся.',
+  })
+  await wait(150)
+  const notice = host.followed.find(note => note.id === 'sess-boss')
+  assert.ok(notice)
+  assert.equal(notice.text, 'Сервер поднялся.\n\nПричины:\n— обновили плагин')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('no notice while the switch is off', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-nonotice-'))
+  const host = fakeHost()
+  writePending(dir, [{ id: '63', cause: 'без уведомления', needNotify: false, sessionId: 'sess-1' }])
+  apply(host.ctx, { stateDir: dir, notifyDelayMs: 5, restartNoticeSessionId: 'sess-boss' })
+  await wait(150)
+  assert.equal(host.followed.length, 0)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('a note whose service comes up late is still delivered, without another restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gr-late-'))
   // sessionController appears after the first attempt has already given up:

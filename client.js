@@ -33,6 +33,16 @@ window.__ModuleLoader__.load({
 				"notifyJobOwners": "Notify the job owner about the restart",
 				"notifyJobOwners.hint": "After the host is up, the session that started a background job gets one note listing every job of its own that the restart killed. One note per session, however many jobs.",
 				"notifyJobOwners.hintOff": "Unavailable while \"Wait for background jobs\" is on: then the restart waits for the jobs instead of killing them.",
+				"restartNotice": "Notify about restarts",
+				"restartNotice.hint": "One fixed session hears about every restart, whatever it was for: the causes of all dsh_restart calls are collected into one message. This replaces a start-up hook script, and needs no systemd drop-in.",
+				"restartNoticeSessionId": "Session ID",
+				"restartNoticeSessionId.hint": "Session that receives the notice, e.g. session-03da57ce-… Leave it empty for no notice.",
+				"restartNoticeMode": "Notice text",
+				"restartNoticeMode.hint": "standard sends the built-in note with every cause. Your own text is sent first, then a blank line, then the causes one per line.",
+				"restartNoticeMode.standard": "standard notice",
+				"restartNoticeMode.custom": "your own text",
+				"restartNoticeText": "Your text",
+				"restartNoticeText.hint": "The causes are appended after a blank line, so this text needs no placeholders.",
 				"language": "Language",
 				"language.hint": "Language of tool descriptions, tool answers and the post-restart note.",
 				"readonly": "Configuration is read-only here.",
@@ -62,6 +72,16 @@ window.__ModuleLoader__.load({
 				"notifyJobOwners": "Уведомлять запустившего job агента о перезапуске",
 				"notifyJobOwners.hint": "После подъёма хоста сессия, запустившая фоновую задачу, получит записку со списком всех своих задач, которые оборвал перезапуск. Одна записка на сессию, сколько бы задач ни было.",
 				"notifyJobOwners.hintOff": "Недоступно, пока включено «Ждать завершение job»: тогда перезапуск дожидается задач, а не обрывает их.",
+				"restartNotice": "Уведомлять о перезапусках",
+				"restartNotice.hint": "Одна заданная сессия узнаёт о каждом перезапуске, зачем бы он ни был: причины всех вызовов dsh_restart собираются в одно сообщение. Замена скрипту на ExecStartPost — drop-in в systemd не нужен.",
+				"restartNoticeSessionId": "ID сессии",
+				"restartNoticeSessionId.hint": "Сессия, которая получит уведомление, например session-03da57ce-…. Пусто — уведомлений нет.",
+				"restartNoticeMode": "Текст уведомления",
+				"restartNoticeMode.hint": "Стандартное — встроенная записка со всеми причинами. Своё — сначала твой текст, потом пустая строка и причины по одной в строке.",
+				"restartNoticeMode.standard": "стандартное уведомление",
+				"restartNoticeMode.custom": "своё уведомление",
+				"restartNoticeText": "Свой текст",
+				"restartNoticeText.hint": "Причины дописываются после пустой строки, подставлять их в текст не нужно.",
 				"language": "Язык",
 				"language.hint": "Язык описаний инструментов, ответов инструментов и записки после перезапуска.",
 				"readonly": "Настройки доступны только для чтения.",
@@ -91,6 +111,16 @@ window.__ModuleLoader__.load({
 				"notifyJobOwners": "重启后通知任务发起者",
 				"notifyJobOwners.hint": "宿主恢复后，发起后台任务的会话会收到一条消息，列出被重启中断的全部任务。每个会话只发一条，无论任务多少。",
 				"notifyJobOwners.hintOff": "开启「等待后台任务结束」时不可用：此时重启会等任务结束，而不是中断它们。",
+				"restartNotice": "重启通知",
+				"restartNotice.hint": "指定会话会收到每次重启的通知：所有 dsh_restart 调用的原因合并成一条消息。可替代 ExecStartPost 钩子脚本，无需 systemd drop-in。",
+				"restartNoticeSessionId": "会话 ID",
+				"restartNoticeSessionId.hint": "接收通知的会话，例如 session-03da57ce-…。留空则不发通知。",
+				"restartNoticeMode": "通知文本",
+				"restartNoticeMode.hint": "标准：内置消息并列出全部原因。自定义：先发送你的文本，然后空一行，再逐行列出原因。",
+				"restartNoticeMode.standard": "标准通知",
+				"restartNoticeMode.custom": "自定义文本",
+				"restartNoticeText": "你的文本",
+				"restartNoticeText.hint": "原因会追加在空行之后，文本中无需占位符。",
 				"language": "语言",
 				"language.hint": "工具描述、工具回复以及重启后消息的语言。",
 				"readonly": "此处配置为只读。",
@@ -317,7 +347,10 @@ window.__ModuleLoader__.load({
 				var input;
 				if (field.kind === "select") {
 					var choices = field.options.map(function(option) {
-						return typeof option === "string" ? { value: option, label: option } : option;
+						if (typeof option === "string") return { value: option, label: option };
+						// A label can be translated: the mode select says "standard" or
+						// "your own text", and neither word survives a literal.
+						return { value: option.value, label: option.labelKey ? t2(option.labelKey) : (option.label || option.value) };
 					});
 					input = h("select", {
 						value: String(props.value == null ? choices[0].value : props.value),
@@ -344,6 +377,20 @@ window.__ModuleLoader__.load({
 						disabled: disabled,
 						style: INPUT_STYLE,
 						onChange: function(event) { commit(props.scope, field.key, Number(event.target.value)); },
+					});
+				} else if (field.kind === "textarea") {
+					// The custom notice is prose, not a value: one line would hide it.
+					input = h("textarea", {
+						value: props.value == null ? "" : String(props.value),
+						disabled: disabled,
+						placeholder: field.placeholder || "",
+						rows: field.rows || 4,
+						style: Object.assign({}, INPUT_STYLE, {
+							resize: "vertical",
+							minHeight: "76px",
+							lineHeight: 1.5,
+						}),
+						onChange: function(event) { commit(props.scope, field.key, event.target.value); },
 					});
 				} else {
 					input = h("input", {
@@ -406,6 +453,18 @@ window.__ModuleLoader__.load({
 			{ key: "notifyJobOwners", kind: "bool",
 				disabled: function(value) { return value.waitForJobs === true; },
 				hintKey: function(value) { return value.waitForJobs === true ? "notifyJobOwners.hintOff" : "notifyJobOwners.hint"; } },
+			// The restart notice: one fixed session hears about every restart, with
+			// the causes the dsh_restart calls carried. It replaces an
+			// `ExecStartPost=` hook that had to guess the cause from the journal.
+			{ key: "restartNotice", kind: "bool" },
+			{ key: "restartNoticeSessionId", kind: "text", placeholder: "session-…",
+				visible: function(value) { return value.restartNotice === true; } },
+			{ key: "restartNoticeMode", kind: "select", options: [
+				{ value: "standard", labelKey: "restartNoticeMode.standard" },
+				{ value: "custom", labelKey: "restartNoticeMode.custom" },
+			], visible: function(value) { return value.restartNotice === true && String(value.restartNoticeSessionId || "").trim() !== ""; } },
+			{ key: "restartNoticeText", kind: "textarea", rows: 5,
+				visible: function(value) { return value.restartNotice === true && value.restartNoticeMode === "custom"; } },
 			{ key: "reasonFile", kind: "text", placeholder: "/home/user/.cache/dsh-restart-reason.txt" },
 			{ key: "language", kind: "select", options: ["en", "ru", "zh"] },
 		];

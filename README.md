@@ -129,7 +129,7 @@ the next restart like any other.
 | File | Contents |
 | --- | --- |
 | `<stateDir>/events.log` | Every request, cancel, window event, cause and exit decision, one line each. Survives journald rotation. |
-| `<stateDir>/pending.json` | Requests and killed-job lists of the restart that just happened, kept until the sessions are woken. |
+| `<stateDir>/pending.json` | Requests and killed-job lists of the restart that just happened, kept until the sessions are woken; also a fixed-session notice that could not be placed yet. |
 
 ## Install
 
@@ -195,6 +195,17 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
   never races host start-up. It is an ordinary turn, so it costs one model call —
   the price of a notification the session can act on. Subagent sessions are
   refused by the service and skipped with a warning: nothing can wake them.
+- **One fixed session can hear about every restart** (`restartNotice` +
+  `restartNoticeSessionId`) — the supported replacement for an `ExecStartPost=`
+  hook that sent a message from `journalctl` after each start. The causes come
+  from the requests themselves, so they are exact where a journal guess was not;
+  what the hook knew and this cannot is a restart nobody announced (a crash, a
+  reboot, a manual `systemctl restart`): no request was registered, so there is no
+  pending file and nothing to report. Two shapes: the standard note with every
+  cause, or `restartNoticeText` followed by a blank line and one line per cause.
+  A session that already gets its own note is skipped, so no session is told
+  twice, and a notice that could not be placed is kept in `pending.json` and
+  retried by the next start.
 - No IM plugin is involved: dsh-im has no part in the note. Whether the answer
   ever reaches a chat is the IM plugin's own delivery setting.
 - A note that could not be placed yet is carried over to the next restart

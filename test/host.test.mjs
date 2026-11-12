@@ -10,6 +10,7 @@ import {
   Config,
   RestartQueue,
   causesOf,
+  composeNotice,
   composeNotes,
   createTools,
   dictionary,
@@ -189,6 +190,10 @@ test('config normalization never throws and keeps values inside bounds', () => {
     reasonFile: '',
     waitForJobs: false,
     notifyJobOwners: true,
+    restartNotice: false,
+    restartNoticeSessionId: '',
+    restartNoticeMode: 'standard',
+    restartNoticeText: '',
     language: 'en',
     stateDir: '',
   })
@@ -202,6 +207,11 @@ test('config normalization never throws and keeps values inside bounds', () => {
   assert.equal(normalizeConfig({}).notifyJobOwners, true, 'the owner note is on unless explicitly refused')
   assert.equal(normalizeConfig({ notifyJobOwners: false }).notifyJobOwners, false)
   assert.equal(normalizeConfig({ notifyJobOwners: 'no' }).notifyJobOwners, true)
+  assert.equal(normalizeConfig({ restartNotice: 'yes' }).restartNotice, false, 'only a real true switches the notice on')
+  assert.equal(normalizeConfig({ restartNotice: true, restartNoticeSessionId: '  sess-1 ' }).restartNoticeSessionId, 'sess-1')
+  assert.equal(normalizeConfig({ restartNoticeMode: 'nonsense' }).restartNoticeMode, 'standard')
+  assert.equal(normalizeConfig({ restartNoticeMode: 'CUSTOM' }).restartNoticeMode, 'custom')
+  assert.equal(normalizeConfig({ restartNoticeText: '\n привет\n\n' }).restartNoticeText, 'привет', 'inner line breaks survive, outer whitespace does not')
 })
 
 test('every field the Config schema declares is handled by normalizeConfig', () => {
@@ -240,6 +250,42 @@ test('the three dictionaries carry the same keys', () => {
     assert.match(dict.restartDescription, /subagent/i.test(dict.restartDescription) ? /.*/ : /subagent|子代理|субагент/i)
   }
   assert.equal(dictionary('de').scheduled, dictionary('en').scheduled, 'unknown language falls back to English')
+})
+
+test('the fixed-session notice names every cause, even of requests that wanted no note', () => {
+  const records = [
+    { id: '1', cause: 'обновили плагин', needNotify: false, sessionId: 'sess-1' },
+    { id: '2', cause: 'поправили конфиг', needNotify: true, sessionId: 'sess-2' },
+    { id: '3', cause: 'обновили плагин', needNotify: true, sessionId: 'sess-3' },
+  ]
+  const notice = composeNotice({ records }, { enabled: true, sessionId: 'sess-boss' }, dictionary('ru'))
+  assert.equal(notice.sessionId, 'sess-boss')
+  assert.match(notice.prompt, /обновили плагин; поправили конфиг/, 'every distinct cause, once each')
+  assert.ok(notice.title.length > 0, 'a schedule task needs a title')
+})
+
+test('a custom notice is the user text, a blank line, then the causes', () => {
+  const records = [{ id: '1', cause: 'обновили плагин' }, { id: '2', cause: 'поправили конфиг' }]
+  const notice = composeNotice({ records }, { enabled: true, sessionId: 's', mode: 'custom', text: '  Сервер поднялся.  ' }, dictionary('ru'))
+  assert.deepEqual(notice.prompt.split('\n'), [
+    'Сервер поднялся.',
+    '',
+    'Причины:',
+    '— обновили плагин',
+    '— поправили конфиг',
+  ])
+})
+
+test('a custom notice without causes keeps the blank line off', () => {
+  const notice = composeNotice({ records: [] }, { enabled: true, sessionId: 's', mode: 'custom', text: 'Готово.' }, dictionary('ru'))
+  assert.equal(notice.prompt, 'Готово.')
+})
+
+test('no notice without the switch or without a session id', () => {
+  const records = [{ id: '1', cause: 'причина' }]
+  assert.equal(composeNotice({ records }, { enabled: false, sessionId: 's' }), null)
+  assert.equal(composeNotice({ records }, { enabled: true, sessionId: '   ' }), null)
+  assert.equal(composeNotice({ records }, {}), null)
 })
 
 test('placeholders are filled, unknown ones survive', () => {

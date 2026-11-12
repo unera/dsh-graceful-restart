@@ -88,6 +88,18 @@ export const Config = z.object({
   notifyJobOwners: z.boolean().default(true)
     .description('Tell the session that started a background job that the restart killed it: after the host is up, each owning session gets one note listing every job of its own that the restart interrupted. Has no effect while waitForJobs is on, because then no job is killed (the card greys it out).')
     .volatile(),
+  restartNotice: z.boolean().default(false)
+    .description('Send one notice about every restart to a fixed session, instead of an ExecStartPost hook script. The notice names every cause accumulated by the dsh_restart calls that produced this restart.')
+    .volatile(),
+  restartNoticeSessionId: z.string().default('')
+    .description('Session that receives the restart notice, for example session-03da57ce-c822-4b1b-8911-716a6cba0a3e. Empty = no notice is sent.')
+    .volatile(),
+  restartNoticeMode: z.string().default('standard')
+    .description('standard: the built-in note with every cause; custom: the text from restartNoticeText first, then a blank line, then the causes one per line.')
+    .volatile(),
+  restartNoticeText: z.string().default('')
+    .description('Your own notice text, used when restartNoticeMode=custom. The causes of the restart are appended after a blank line, so the text need not mention them.')
+    .volatile(),
   language: z.string().default('en')
     .description('Language of tool descriptions, tool answers and the post-restart note: en (default), ru, zh.')
     .volatile(),
@@ -135,6 +147,9 @@ const DICT = {
     notify: '🔁 The DSH host restarted on request ({causes}). The process is up again — continue the work you were doing.',
     notifyCauseSeparator: '; ',
     noCause: 'no cause given',
+    noticeTitle: 'DSH restarted on request',
+    noticeCausesTitle: 'Causes:',
+    noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH restarted: background jobs were cut off',
     jobLossIntro: '⚠️ The restart cut off {count} background job(s) of this session, so their results are lost. Check what they managed to do and start them again if that work still matters.',
     jobLossLine: '• {id} ({kind}), "{label}", ran for {elapsed}',
@@ -175,6 +190,9 @@ const DICT = {
     notify: '🔁 DSH перезапущен по запросу ({causes}). Процесс снова работает — можно продолжать работу.',
     notifyCauseSeparator: '; ',
     noCause: 'причина не указана',
+    noticeTitle: 'DSH перезапущен по запросу',
+    noticeCausesTitle: 'Причины:',
+    noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH перезапущен: фоновые задачи оборваны',
     jobLossIntro: '⚠️ Из-за перезапуска оборвано фоновых задач: {count}. Их результат потерян — проверь, что они успели сделать, и запусти заново, если работа ещё нужна.',
     jobLossLine: '• {id} ({kind}), «{label}», работала {elapsed}',
@@ -215,6 +233,9 @@ const DICT = {
     notify: '🔁 DSH 已按请求重启（原因：{causes}）。进程已恢复，可以继续工作。',
     notifyCauseSeparator: '；',
     noCause: '未说明原因',
+    noticeTitle: 'DSH 已按请求重启',
+    noticeCausesTitle: '原因：',
+    noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH 已重启：后台任务被中断',
     jobLossIntro: '⚠️ 重启中断了本会话的 {count} 个后台任务，结果已丢失。请检查它们完成了多少，如仍需继续就重新启动。',
     jobLossLine: '• {id}（{kind}）“{label}”，运行了 {elapsed}',
@@ -252,6 +273,8 @@ export function normalizeConfig (raw) {
     return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 600) : fallback
   }
   const text = (candidate, fallback = '') => (typeof candidate === 'string' ? candidate.trim() : fallback)
+  // A custom notice keeps its own line breaks: only the outer whitespace goes.
+  const paragraph = (candidate, fallback = '') => (typeof candidate === 'string' ? candidate.replace(/^\s+|\s+$/g, '') : fallback)
   const method = text(value.exitMethod, 'systemctl').toLowerCase()
   return {
     exitMethod: ['systemctl', 'command', 'kill', 'exit'].includes(method) ? method : 'systemctl',
@@ -261,6 +284,10 @@ export function normalizeConfig (raw) {
     reasonFile: text(value.reasonFile, ''),
     waitForJobs: value.waitForJobs === true,
     notifyJobOwners: value.notifyJobOwners !== false,
+    restartNotice: value.restartNotice === true,
+    restartNoticeSessionId: text(value.restartNoticeSessionId, ''),
+    restartNoticeMode: text(value.restartNoticeMode, 'standard').toLowerCase() === 'custom' ? 'custom' : 'standard',
+    restartNoticeText: paragraph(value.restartNoticeText, ''),
     language: text(value.language, 'en') || 'en',
     stateDir: text(value.stateDir, ''),
   }
@@ -389,6 +416,46 @@ export function composeNotes ({ records = [], jobLoss = [] } = {}, dict = DICT.e
     })
   }
   return out
+}
+
+/**
+ * Build the one notice a fixed session receives about every restart — the
+ * replacement for an `ExecStartPost=` hook script, but with the causes the
+ * requests themselves carry instead of a guess read back from the journal.
+ *
+ * Two shapes, chosen by `notice.mode`:
+ *   - standard — the same note a requesting session gets, with every cause;
+ *   - custom   — the text the user wrote, a blank line, then the causes one per
+ *                line, so the user's text never has to mention them.
+ *
+ * Causes are collected from *every* pending request, not only from the ones that
+ * asked for a wake-up: the notice reports the restart, whatever it was for.
+ *
+ * @param {{records?: object[]}} pending - what the previous life persisted.
+ * @param {{enabled?: boolean, sessionId?: string, mode?: string, text?: string}} notice - the configured notice.
+ * @param {object} [dict] - dictionary of the configured language.
+ * @returns {{sessionId: string, title: string, prompt: string}|null} the notice, or null when none is wanted.
+ */
+export function composeNotice ({ records = [] } = {}, notice = {}, dict = DICT.en) {
+  const d = dict
+  if (notice?.enabled !== true) return null
+  const sessionId = typeof notice.sessionId === 'string' ? notice.sessionId.trim() : ''
+  if (!sessionId) return null
+  const causes = []
+  for (const record of Array.isArray(records) ? records : []) {
+    const cause = String(record?.cause ?? '').trim()
+    if (cause && !causes.includes(cause)) causes.push(cause)
+  }
+  const custom = typeof notice.text === 'string' ? notice.text.trim() : ''
+  const useCustom = notice.mode === 'custom' && custom.length > 0
+  const body = useCustom
+    ? custom
+    : format(d.notify, { causes: causes.join(d.notifyCauseSeparator) || d.noCause })
+  const parts = [body]
+  if (useCustom && causes.length > 0) {
+    parts.push([d.noticeCausesTitle, ...causes.map(cause => format(d.noticeCauseLine, { cause }))].join('\n'))
+  }
+  return { sessionId, title: d.noticeTitle, prompt: parts.join('\n\n') }
 }
 
 /* ------------------------------------------------------------------- queue */
@@ -823,6 +890,16 @@ export function apply (ctx, config = {}) {
     const live = settingsSectionOf(liveSettings)
     return live ? normalizeConfig({ ...initial, ...live }) : initial
   }
+  /** The fixed-session notice, in the shape `composeNotice` expects. Read live, like every option. */
+  const noticeOptions = () => {
+    const current = options()
+    return {
+      enabled: current.restartNotice === true,
+      sessionId: current.restartNoticeSessionId,
+      mode: current.restartNoticeMode,
+      text: current.restartNoticeText,
+    }
+  }
   const stateDir = () => resolveStateDir(options())
   const pendingFile = () => join(stateDir(), 'pending.json')
   const eventsFile = () => join(stateDir(), 'events.log')
@@ -1131,11 +1208,38 @@ export function apply (ctx, config = {}) {
     // placed or was never due must not hear about this restart again.
     const keep = records.filter(record => record?.needNotify === true && record?.sessionId && failed.has(String(record.sessionId)))
     const keepJobLoss = mergeJobLoss([], jobLoss).filter(group => failed.has(group.sessionId))
+    // The fixed-session notice: one message about the restart itself, with every
+    // cause of every request. A notice that could not be placed is kept in the
+    // same file and retried by the next start, exactly like a kept note.
+    const keptNotice = state?.notice && typeof state.notice.prompt === 'string' && typeof state.notice.sessionId === 'string'
+      ? state.notice
+      : null
+    const freshNotice = composeNotice({ records }, noticeOptions(), d)
+    const notices = []
+    if (keptNotice) notices.push(keptNotice)
+    if (freshNotice && !notices.some(note => note.prompt === freshNotice.prompt && note.sessionId === freshNotice.sessionId)) {
+      notices.push(freshNotice)
+    }
+    let keptForLater = null
+    for (const note of notices) {
+      if (notes.some(other => other.sessionId === note.sessionId)) {
+        // The session already gets its own note about this restart; a second,
+        // nearly identical message would only be noise.
+        log('info', `restart notice for session ${note.sessionId} skipped: that session already gets its own note`)
+        if (keptForLater && keptForLater.sessionId === note.sessionId) keptForLater = null
+        continue
+      }
+      log('info', `sending the restart notice to session ${note.sessionId}`)
+      if (await placeReminder(note)) continue
+      keptForLater = note
+      log('warn', `restart notice for session ${note.sessionId} stayed pending`)
+    }
     try {
-      if (keep.length === 0 && keepJobLoss.length === 0) {
+      if (keep.length === 0 && keepJobLoss.length === 0 && !keptForLater) {
         rmSync(pendingFile(), { force: true })
       } else {
-        writeFileSync(pendingFile(), `${JSON.stringify({ ...state, version: 2, records: keep, jobLoss: keepJobLoss }, null, 2)}\n`)
+        const notice = keptForLater ? { sessionId: keptForLater.sessionId, title: keptForLater.title, prompt: keptForLater.prompt } : undefined
+        writeFileSync(pendingFile(), `${JSON.stringify({ ...state, version: 2, records: keep, jobLoss: keepJobLoss, ...(notice ? { notice } : {}) }, null, 2)}\n`)
       }
     } catch (error) {
       log('warn', `cannot rewrite ${pendingFile()}: ${error?.message ?? error}`)
