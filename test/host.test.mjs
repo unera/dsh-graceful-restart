@@ -262,23 +262,21 @@ test('the fixed-session notice names every cause, even of requests that wanted n
   assert.equal(notice.sessionId, 'sess-boss')
   assert.match(notice.prompt, /обновили плагин; поправили конфиг/, 'every distinct cause, once each')
   assert.ok(notice.title.length > 0, 'a schedule task needs a title')
+  assert.match(notice.prompt, /^Это уведомление, а не задача/, 'the waking session is told to answer, not to investigate')
+  assert.match(notice.prompt, /не вызывай инструменты/)
 })
 
 test('a custom notice is the user text, a blank line, then the causes', () => {
   const records = [{ id: '1', cause: 'обновили плагин' }, { id: '2', cause: 'поправили конфиг' }]
   const notice = composeNotice({ records }, { enabled: true, sessionId: 's', mode: 'custom', text: '  Сервер поднялся.  ' }, dictionary('ru'))
-  assert.deepEqual(notice.prompt.split('\n'), [
-    'Сервер поднялся.',
-    '',
-    'Причины:',
-    '— обновили плагин',
-    '— поправили конфиг',
-  ])
+  assert.ok(notice.prompt.endsWith('Сервер поднялся.\n\nПричины:\n— обновили плагин\n— поправили конфиг'),
+    'the user text, a blank line, then the causes')
+  assert.match(notice.prompt, /^Это уведомление, а не задача/)
 })
 
 test('a custom notice without causes keeps the blank line off', () => {
   const notice = composeNotice({ records: [] }, { enabled: true, sessionId: 's', mode: 'custom', text: 'Готово.' }, dictionary('ru'))
-  assert.equal(notice.prompt, 'Готово.')
+  assert.ok(notice.prompt.endsWith('\n\nГотово.'), 'no empty causes block')
 })
 
 test('no notice without the switch or without a session id', () => {

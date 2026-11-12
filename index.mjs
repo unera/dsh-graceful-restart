@@ -148,6 +148,7 @@ const DICT = {
     notifyCauseSeparator: '; ',
     noCause: 'no cause given',
     noticeTitle: 'DSH restarted on request',
+    noticeInstruction: 'This is a notification, not a task: run no commands, check nothing and call no tools. Answer with exactly the text below, without a word of your own.',
     noticeCausesTitle: 'Causes:',
     noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH restarted: background jobs were cut off',
@@ -191,6 +192,7 @@ const DICT = {
     notifyCauseSeparator: '; ',
     noCause: 'причина не указана',
     noticeTitle: 'DSH перезапущен по запросу',
+    noticeInstruction: 'Это уведомление, а не задача: не запускай команд, ничего не проверяй и не вызывай инструменты. Ответь ровно текстом ниже, без единого своего слова.',
     noticeCausesTitle: 'Причины:',
     noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH перезапущен: фоновые задачи оборваны',
@@ -234,6 +236,7 @@ const DICT = {
     notifyCauseSeparator: '；',
     noCause: '未说明原因',
     noticeTitle: 'DSH 已按请求重启',
+    noticeInstruction: '这是通知，不是任务：不要运行命令、不要检查、不要调用工具。只回答下面的文本，不要多写一个字。',
     noticeCausesTitle: '原因：',
     noticeCauseLine: '— {cause}',
     jobLossTitle: 'DSH 已重启：后台任务被中断',
@@ -428,6 +431,11 @@ export function composeNotes ({ records = [], jobLoss = [] } = {}, dict = DICT.e
  *   - custom   — the text the user wrote, a blank line, then the causes one per
  *                line, so the user's text never has to mention them.
  *
+ * Whatever the shape, the prompt opens with an instruction to answer with that
+ * text alone and to touch nothing: the notice wakes a real session turn, and a
+ * turn that starts investigating the host is a cost and a surprise the reader
+ * did not ask for.
+ *
  * Causes are collected from *every* pending request, not only from the ones that
  * asked for a wake-up: the notice reports the restart, whatever it was for.
  *
@@ -455,7 +463,7 @@ export function composeNotice ({ records = [] } = {}, notice = {}, dict = DICT.e
   if (useCustom && causes.length > 0) {
     parts.push([d.noticeCausesTitle, ...causes.map(cause => format(d.noticeCauseLine, { cause }))].join('\n'))
   }
-  return { sessionId, title: d.noticeTitle, prompt: parts.join('\n\n') }
+  return { sessionId, title: d.noticeTitle, prompt: [d.noticeInstruction, ...parts].join('\n\n') }
 }
 
 /* ------------------------------------------------------------------- queue */

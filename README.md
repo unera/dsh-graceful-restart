@@ -205,7 +205,11 @@ Two identities in `cordis.patch.yml`, and both are load-bearing:
   cause, or `restartNoticeText` followed by a blank line and one line per cause.
   The notice is composed by the process that restarts and stored in
   `pending.json`: at start-up the settings service may not be up yet, and a notice
-  decided from defaults would silently never be sent. A session that already gets
+  decided from defaults would silently never be sent. The prompt opens with an
+  instruction to answer with the notice alone and to call no tools, so the wake is
+  one short model call that does nothing — but it is still a turn: a chat sees a
+  message only as the final answer of a turn, and a turn without the model does
+  not exist. A session that already gets
   its own note is skipped, so nobody is told twice, and a notice that could not be
   placed is kept in the same file and retried by the next start.
 - No IM plugin is involved: dsh-im has no part in the note. Whether the answer
